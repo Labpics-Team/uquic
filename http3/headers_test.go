@@ -469,11 +469,10 @@ var _ = Describe("Response", func() {
 	})
 
 	It("accepts headers exactly at the size limit", func() {
-		// one field: len("a")+len("b")+32 = 34 bytes; a 34-byte budget is exact
 		headers := []qpack.HeaderField{
 			{Name: ":status", Value: "200"},
 		}
-		// budget = len(":status")+len("200")+32 = 7+3+32 = 42
+		// budget = len(":status")+len("200")+32 = 7+3+32 = 42 — exactly the decoded size
 		err := updateResponseFromHeaders(&http.Response{}, headers, 42)
 		Expect(err).ToNot(HaveOccurred())
 	})

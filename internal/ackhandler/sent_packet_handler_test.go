@@ -1235,6 +1235,73 @@ func TestSentPacketHandlerPathProbeAckAndLoss(t *testing.T) {
 	require.Equal(t, t2.Add(pathProbePacketLossTimeout), sph.GetLossDetectionTimeout())
 }
 
+// Deterministic regression test for CVE-2025-29785.
+//
+// The bug: when an ACK arrives for a path-probe packet that has ALREADY been
+// declared lost, detectAndRemoveAckedPackets still finds the probe's placeholder
+// in the packet history and calls history.RemovePathProbe(pn). Because the probe
+// was already removed from pathProbePackets at loss time, RemovePathProbe returns
+// nil. The unpatched code did `panic("path probe doesn't exist")` on that nil.
+//
+// This test builds that exact state deterministically — send a probe, drive it
+// past the path-probe loss timeout so it is declared lost, then deliver an ACK
+// that covers the now-lost probe's packet number — and asserts the handler does
+// not panic and processes the ACK cleanly. It reproduces the panic on the
+// unpatched handler at -count=1; the randomized test below only hits it
+// probabilistically and is a weaker guard.
+func TestSentPacketHandlerPathProbeAckAfterLoss(t *testing.T) {
+	const rtt = 10 * time.Millisecond
+	var rttStats utils.RTTStats
+	rttStats.UpdateRTT(rtt, 0)
+
+	sph := newSentPacketHandler(
+		0,
+		1200,
+		&rttStats,
+		true, // handshakeConfirmed: required so OnLossDetectionTimeout runs detectLostPathProbes
+		false,
+		protocol.PerspectiveClient,
+		nil,
+		utils.DefaultLogger,
+	)
+	sph.DropPackets(protocol.EncryptionInitial, time.Now())
+	sph.DropPackets(protocol.EncryptionHandshake, time.Now())
+
+	var packets packetTracker
+	sendPathProbe := func(ti time.Time) protocol.PacketNumber {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(ti, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, true)
+		return pn
+	}
+
+	// Send one path-probe packet.
+	now := time.Now()
+	probePN := sendPathProbe(now)
+
+	// Advance past the path-probe loss timeout and fire the loss detection timer.
+	// This declares the probe lost: RemovePathProbe drops it from pathProbePackets,
+	// but its placeholder remains in the packet-number history.
+	now = now.Add(pathProbePacketLossTimeout + time.Millisecond)
+	require.NoError(t, sph.OnLossDetectionTimeout(now))
+	require.Equal(t, []protocol.PacketNumber{probePN}, packets.Lost)
+	require.False(t, sph.appDataPackets.history.HasOutstandingPathProbes())
+
+	// Deliver a (delayed) ACK for the already-lost probe packet number.
+	// On the unpatched handler this panics with "path probe doesn't exist";
+	// the fix must process it without panicking and without re-acking.
+	packets.Reset()
+	require.NotPanics(t, func() {
+		_, err := sph.ReceivedAck(
+			&wire.AckFrame{AckRanges: ackRanges(probePN)},
+			protocol.Encryption1RTT,
+			now,
+		)
+		require.NoError(t, err)
+	})
+	require.Empty(t, packets.Acked)
+	require.Empty(t, packets.Lost)
+}
+
 // The packet tracking logic is pretty complex.
 // We test it with a randomized approach, to make sure that it doesn't panic under any circumstances.
 func TestSentPacketHandlerRandomized(t *testing.T) {
