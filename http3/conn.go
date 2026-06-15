@@ -141,7 +141,7 @@ func (c *connection) decodeTrailers(r io.Reader, l, maxHeaderBytes uint64) (http
 	if err != nil {
 		return nil, err
 	}
-	return parseTrailers(fields)
+	return parseTrailers(fields, headerSizeLimit(maxHeaderBytes))
 }
 
 func (c *connection) acceptStream(ctx context.Context) (quic.Stream, *datagrammer, error) {

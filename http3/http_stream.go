@@ -237,7 +237,7 @@ func (s *requestStream) ReadResponse() (*http.Response, error) {
 		return nil, fmt.Errorf("http3: failed to decode response headers: %w", err)
 	}
 	res := s.response
-	if err := updateResponseFromHeaders(res, hfs); err != nil {
+	if err := updateResponseFromHeaders(res, hfs, headerSizeLimit(s.maxHeaderBytes)); err != nil {
 		s.Stream.CancelRead(quic.StreamErrorCode(ErrCodeMessageError))
 		s.Stream.CancelWrite(quic.StreamErrorCode(ErrCodeMessageError))
 		return nil, fmt.Errorf("http3: invalid response: %w", err)
