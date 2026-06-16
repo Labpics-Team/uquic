@@ -41,6 +41,12 @@ var (
 	QUICChrome_115_IPv6 = QUICID{quicChrome, "115_ip6", "beeb454235791d5c"} // IPv6
 	// TODO: add Chrome fingerprints with Token and PSK extension
 
+	// QUICChrome_146 mimics a current Chrome (Initial = Chrome 143 transport, TLS = Chrome 143/146 QUIC
+	// ClientHello). Spec adapted from sardanioss/quic-go and sardanioss/httpcloak (both MIT) and the
+	// HelloChrome_143_QUIC body in sardanioss/utls (BSD-3), to which HelloChrome_146_QUIC aliases.
+	// See QUICID2Spec for the residual-fidelity notes versus a native Chrome-146 build.
+	QUICChrome_146 = QUICID{quicChrome, "146", "c0ffee1d0fcad146"}
+
 	// TODO: add more QUIC clients and versions
 )
 
@@ -278,6 +284,147 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 						},
 					},
 				}),
+			},
+		}, nil
+	case QUICChrome_146:
+		// Chrome 146 QUIC parrot.
+		//
+		// Spec adapted from sardanioss/quic-go and sardanioss/httpcloak (both MIT) and the
+		// HelloChrome_143_QUIC body in sardanioss/utls (BSD-3) — HelloChrome_146_QUIC aliases
+		// to HelloChrome_145_QUIC aliases to HelloChrome_143_QUIC. Byte-validated by sardanioss
+		// against quic.browserleaks.com for Chrome 143 (transport) / 146 (TLS).
+		//
+		// Re-expressed in refraction-networking/utls types (the pin this repo resolves, which
+		// tops out at the HelloChrome_133 preset) rather than pasted from sardanioss's API. The
+		// pinned utls already exports every primitive Chrome 146 needs — the X25519MLKEM768
+		// post-quantum keyshare, ApplicationSettingsExtensionNew (ALPS codepoint 17613),
+		// BoringGREASEECH (GREASE ECH 65037), and the QUIC transport parameter types — so no
+		// utls bump (and therefore no StoreSession drop) is required.
+		//
+		// Residual fidelity gap versus a native sardanioss/utls Chrome-146 build:
+		//   - Initial-packet frame layout uses uQUIC's QUICRandomFrames builder, which inserts
+		//     PING/PADDING randomly and shuffles, whereas Chrome's real layout is deterministic
+		//     (CRYPTO ~80B, PING after every 2 CRYPTO + trailing PING, interspersed single 0x00
+		//     PADDING, ClientHello split across 2 packets). The frame *counts* are Chrome-like;
+		//     the exact ordering is not. uQUIC has no deterministic Chrome frame builder.
+		//   - initial_rtt (0x3127) is omitted: it carries a per-host measured RTT and uQUIC's
+		//     QUICTransportParametersExtension has no facility to compute and inject it.
+		// Both are documented, not faked. See the project report for the validation gate.
+		return QUICSpec{
+			InitialPacketSpec: InitialPacketSpec{
+				SrcConnIDLength:        0, // Chrome uses an empty source connection ID
+				DestConnIDLength:       8,
+				InitPacketNumberLength: 1,
+				InitPacketNumber:       1, // Chrome starts the Initial packet number at 1, not 0
+				ClientTokenLength:      0,
+				FrameBuilder: &QUICRandomFrames{ // Chrome interleaves CRYPTO/PING/PADDING frames
+					MinPING:    1,
+					MaxPING:    4,
+					MinCRYPTO:  2,
+					MaxCRYPTO:  8,
+					MinPADDING: 3,
+					MaxPADDING: 6,
+					Length:     1231 - 16, // 16-byte for the AEAD auth tag
+				},
+			},
+			ClientHelloSpec: &tls.ClientHelloSpec{
+				TLSVersMin: tls.VersionTLS13,
+				TLSVersMax: tls.VersionTLS13,
+				CipherSuites: []uint16{
+					// Chrome QUIC offers only the three TLS 1.3 ciphers, no GREASE cipher.
+					tls.TLS_AES_128_GCM_SHA256,
+					tls.TLS_AES_256_GCM_SHA384,
+					tls.TLS_CHACHA20_POLY1305_SHA256,
+				},
+				CompressionMethods: []uint8{
+					0x0, // no compression
+				},
+				// Chrome's QUIC ClientHello is sent in a FIXED extension order and contains NO
+				// GREASE TLS extensions (GREASE lives only in the transport parameters). This
+				// differs from Chrome's HTTP/2 ClientHello, so the extensions are NOT shuffled
+				// here. Order: [17613, 45, 65037, 10, 16, 43, 0, 13, 27, 57, 51].
+				Extensions: []tls.TLSExtension{
+					&tls.ApplicationSettingsExtensionNew{ // application_settings (17613)
+						SupportedProtocols: []string{"h3"},
+					},
+					&tls.PSKKeyExchangeModesExtension{ // psk_key_exchange_modes (45)
+						Modes: []uint8{tls.PskModeDHE},
+					},
+					tls.BoringGREASEECH(), // encrypted_client_hello (65037) — GREASE ECH
+					&tls.SupportedCurvesExtension{ // supported_groups (10) — PQ hybrid first, no GREASE
+						Curves: []tls.CurveID{
+							tls.X25519MLKEM768,
+							tls.X25519,
+							tls.CurveP256,
+							tls.CurveP384,
+						},
+					},
+					&tls.ALPNExtension{ // application_layer_protocol_negotiation (16)
+						AlpnProtocols: []string{"h3"},
+					},
+					&tls.SupportedVersionsExtension{ // supported_versions (43) — TLS 1.3 only
+						Versions: []uint16{tls.VersionTLS13},
+					},
+					&tls.SNIExtension{}, // server_name (0)
+					&tls.SignatureAlgorithmsExtension{ // signature_algorithms (13)
+						SupportedSignatureAlgorithms: []tls.SignatureScheme{
+							tls.ECDSAWithP256AndSHA256,
+							tls.PSSWithSHA256,
+							tls.PKCS1WithSHA256,
+							tls.ECDSAWithP384AndSHA384,
+							tls.PSSWithSHA384,
+							tls.PKCS1WithSHA384,
+							tls.PSSWithSHA512,
+							tls.PKCS1WithSHA512,
+							tls.PKCS1WithSHA1, // Chrome includes this
+						},
+					},
+					&tls.UtlsCompressCertExtension{ // compress_certificate (27)
+						Algorithms: []tls.CertCompressionAlgo{
+							tls.CertCompressionBrotli,
+						},
+					},
+					// quic_transport_parameters (57). Chrome shuffles the parameter order per
+					// session; ShuffleQUICTransportParameters reproduces that. Chrome does NOT
+					// send active_connection_id_limit, max_ack_delay, or disable_active_migration.
+					ShuffleQUICTransportParameters(&tls.QUICTransportParametersExtension{
+						TransportParameters: tls.TransportParameters{
+							tls.InitialMaxStreamsUni(103),
+							tls.MaxIdleTimeout(30000),
+							tls.InitialMaxData(15728640),
+							tls.InitialMaxStreamDataUni(6291456),
+							&tls.VersionInformation{
+								ChoosenVersion: tls.VERSION_1,
+								AvailableVersions: []uint32{
+									tls.VERSION_GREASE,
+									tls.VERSION_1,
+								},
+								LegacyID: true,
+							},
+							&tls.FakeQUICTransportParameter{ // google_quic_version (0x4752)
+								Id:  0x4752,
+								Val: []byte{0x00, 0x00, 0x00, 0x01}, // Google QUIC version 1
+							},
+							&tls.FakeQUICTransportParameter{ // google_connection_options (0x3128)
+								Id:  0x3128,
+								Val: []byte{0x4F, 0x52, 0x49, 0x47}, // "ORIG" — current stable-Chrome default (Chromium kQuicOptions)
+							},
+							tls.MaxDatagramFrameSize(65536),
+							tls.InitialMaxStreamsBidi(100),
+							tls.InitialMaxStreamDataBidiLocal(6291456),
+							VariableLengthGREASEQTP(0x10), // Chrome inserts one GREASE transport parameter
+							tls.InitialSourceConnectionID([]byte{}),
+							tls.MaxUDPPayloadSize(1472),
+							tls.InitialMaxStreamDataBidiRemote(6291456),
+						},
+					}),
+					&tls.KeyShareExtension{ // key_share (51) — PQ hybrid + X25519, no GREASE
+						KeyShares: []tls.KeyShare{
+							{Group: tls.X25519MLKEM768},
+							{Group: tls.X25519},
+						},
+					},
+				},
 			},
 		}, nil
 	case QUICFirefox_116A:

@@ -274,7 +274,38 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		}
 		return qfs.Build(cryptoData)
 	}
+
+	// cryptoData has been reassembled with its base offset stripped (it always starts
+	// at index 0 here). When the ClientHello spans multiple Initial packets — as the
+	// post-quantum Chrome ClientHello does — this packet's crypto data starts at a
+	// non-zero offset in the crypto stream. An offset-aware builder must re-apply that
+	// base offset, otherwise later packets would emit CRYPTO frames at offset 0 and
+	// corrupt the server-side reassembly. Builders that are not offset-aware are only
+	// correct for single-packet ClientHellos.
+	baseOffset := cryptoBaseOffset(qchframes)
+	if oab, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(offsetAwareFrameBuilder); ok {
+		return oab.BuildAt(cryptoData, baseOffset)
+	}
 	return p.uSpec.InitialPacketSpec.FrameBuilder.Build(cryptoData)
+}
+
+// cryptoBaseOffset returns the lowest CRYPTO-frame offset among the given frames,
+// which is the crypto-stream offset at which this packet's reassembled crypto data
+// begins. Returns 0 when there are no CRYPTO frames.
+func cryptoBaseOffset(frames []clienthellod.QUICFrame) uint64 {
+	var base uint64
+	found := false
+	for _, frame := range frames {
+		cf, ok := frame.(*clienthellod.CRYPTO)
+		if !ok {
+			continue
+		}
+		if !found || cf.Offset < base {
+			base = cf.Offset
+			found = true
+		}
+	}
+	return base
 }
 
 func (p *uPacketPacker) MaybePackPTOProbePacket(

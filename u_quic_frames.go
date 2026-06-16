@@ -18,6 +18,22 @@ type QUICFrameBuilder interface {
 	Build(cryptoData []byte) (allFrames []byte, err error)
 }
 
+// offsetAwareFrameBuilder is an optional extension of QUICFrameBuilder for builders
+// that can place their CRYPTO frames at a non-zero base offset in the crypto stream.
+// This is required for ClientHellos that span multiple Initial packets (e.g. the
+// post-quantum X25519MLKEM768 ClientHello, which exceeds a single QUIC datagram):
+// the second and later packets carry crypto data starting at a non-zero offset, and
+// emitting it at offset 0 would corrupt the server-side reassembly. Builders that do
+// not implement this are only correct for single-packet (offset 0) ClientHellos.
+type offsetAwareFrameBuilder interface {
+	QUICFrameBuilder
+
+	// BuildAt behaves like Build but treats cryptoData as starting at baseOffset in
+	// the crypto stream, so every emitted CRYPTO frame carries an absolute offset of
+	// baseOffset plus its position within cryptoData.
+	BuildAt(cryptoData []byte, baseOffset uint64) (allFrames []byte, err error)
+}
+
 // QUICFrames is a slice of QUICFrame that implements QUICFrameBuilder.
 // It could be used to deterministically build QUIC Frames from crypto data.
 type QUICFrames []QUICFrame
@@ -31,11 +47,19 @@ func (qfs QUICFrames) Build(cryptoData []byte) (payload []byte, err error) {
 		return qfsCryptoOnly.Build(cryptoData)
 	}
 
-	lowestOffset := math.MaxUint16
+	// lowestOffset is the base crypto-stream offset for this packet, used to map an
+	// absolute CRYPTO offset back to an index into cryptoData. Only CRYPTO frames carry
+	// a meaningful offset; PADDING/PING report 0 via CryptoFrameInfo and must be
+	// excluded, otherwise they would pin lowestOffset to 0 and corrupt the index math
+	// for multi-packet ClientHellos where the base offset is non-zero.
+	lowestOffset := math.MaxInt
 	for _, frame := range qfs {
-		if offset, _, _ := frame.CryptoFrameInfo(); offset < lowestOffset {
+		if offset, _, cryptoOK := frame.CryptoFrameInfo(); cryptoOK && offset < lowestOffset {
 			lowestOffset = offset
 		}
+	}
+	if lowestOffset == math.MaxInt {
+		lowestOffset = 0 // no CRYPTO frames present
 	}
 
 	for _, frame := range qfs {
@@ -197,8 +221,17 @@ type QUICRandomFrames struct {
 
 // Build ingests data from crypto frames without the crypto frame header
 // and returns the byte representation of all frames as specified in
-// the slice.
+// the slice. cryptoData is assumed to start at offset 0 in the crypto stream.
 func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error) {
+	return qrf.BuildAt(cryptoData, 0)
+}
+
+// BuildAt is like Build but treats cryptoData as starting at baseOffset in the
+// crypto stream, so every emitted CRYPTO frame carries an absolute offset of
+// baseOffset plus its position within cryptoData. This makes the builder correct
+// for multi-packet ClientHellos (the later Initial packets carry a non-zero
+// crypto-stream offset).
+func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payload []byte, err error) {
 	// check all bounds
 	if qrf.MinPING > qrf.MaxPING {
 		return nil, errors.New("MinPING must be less than or equal to MaxPING")
@@ -218,7 +251,15 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 
 	var frameList QUICFrames = make([]QUICFrame, 0)
 
-	var cryptoSafeRandUint64 = func(min, max uint64) (uint64, error) {
+	var cryptoSafeRandUint64 = func(min, max uint64) (uint64, error) { //nolint:revive // min/max read clearer than the suggested alternatives here
+		// When the range is empty or inverted (max <= min) there is exactly one
+		// valid value: min. Returning it avoids calling rand.Int with a non-positive
+		// bound, which panics ("argument to Int is <= 0"). This happens legitimately
+		// when the remaining crypto/padding budget shrinks to the number of frames
+		// still to emit, so it must be handled rather than treated as an error.
+		if max <= min {
+			return min, nil
+		}
 		minMaxDiff := big.NewInt(int64(max - min))
 		offset, err := rand.Int(rand.Reader, minMaxDiff)
 		if err != nil {
@@ -248,19 +289,26 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 	offsetCryptoData := uint64(0)
 	for i := uint64(0); i < numCRYPTO-1; i++ { // select n-1 times, since the last one must be the remaining
 		// randomly select length of CRYPTO frame.
-		// Length must be at least 1 byte and at most the remaining length of cryptoData minus the remaining number of CRYPTO frames.
-		// i.e. len in [1, len(cryptoData)-offsetCryptoData-(numCRYPTO-i-2))
-		lenCRYPTO, err := cryptoSafeRandUint64(1, lenCryptoData-(numCRYPTO-i-2))
+		// Length must be at least 1 byte and at most the remaining length of cryptoData
+		// minus 1 byte reserved for each of the CRYPTO frames still to be emitted after
+		// this one (numCRYPTO-i-2 of them). Compute the upper bound with subSat so an
+		// over-subscribed split (more frames than bytes) can never wrap uint64 negative
+		// and panic — it simply yields max == 1 and degrades to 1-byte frames.
+		maxLenCRYPTO := subSat(lenCryptoData, numCRYPTO-i-2)
+		lenCRYPTO, err := cryptoSafeRandUint64(1, maxLenCRYPTO)
 		if err != nil {
 			return nil, err
 		}
-		frameList = append(frameList, QUICFrameCrypto{Offset: int(offsetCryptoData), Length: int(lenCRYPTO)})
+		if lenCRYPTO > lenCryptoData {
+			lenCRYPTO = lenCryptoData // never read past the available crypto data
+		}
+		frameList = append(frameList, QUICFrameCrypto{Offset: int(baseOffset + offsetCryptoData), Length: int(lenCRYPTO)})
 		offsetCryptoData += lenCRYPTO
 		lenCryptoData -= lenCRYPTO
 	}
 
 	// append the last CRYPTO frame
-	frameList = append(frameList, QUICFrameCrypto{Offset: int(offsetCryptoData), Length: 0}) // 0 means the remaining
+	frameList = append(frameList, QUICFrameCrypto{Offset: int(baseOffset + offsetCryptoData), Length: 0}) // 0 means the remaining
 
 	// dry-run to determine the total length of all frames so far
 	dryrunPayload, err := frameList.Build(cryptoData)
@@ -280,11 +328,16 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 
 		for i := uint64(0); i < numPADDING-1; i++ { // select n-1 times, since the last one must be the remaining
 			// randomly select length of PADDING frame.
-			// Length must be at least 1 byte and at most the remaining length of cryptoData minus the remaining number of CRYPTO frames.
-			// i.e. len in [1, lenPADDING-(numPADDING-i-2))
-			lenPADDINGFrame, err := cryptoSafeRandUint64(1, lenPADDING-(numPADDING-i-2))
+			// Length must be at least 1 byte and at most the remaining padding budget
+			// minus 1 byte reserved for each PADDING frame still to be emitted after this
+			// one. Use subSat so an over-subscribed split cannot wrap uint64 negative.
+			maxLenPADDING := subSat(lenPADDING, numPADDING-i-2)
+			lenPADDINGFrame, err := cryptoSafeRandUint64(1, maxLenPADDING)
 			if err != nil {
 				return nil, err
+			}
+			if lenPADDINGFrame > lenPADDING {
+				lenPADDINGFrame = lenPADDING
 			}
 			frameList = append(frameList, QUICFramePadding{Length: int(lenPADDINGFrame)})
 			lenPADDING -= lenPADDINGFrame
@@ -301,4 +354,14 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 
 	// build the payload
 	return frameList.Build(cryptoData)
+}
+
+// subSat returns a-b, saturating at 0 instead of wrapping when b > a. Used to
+// compute per-frame length bounds without uint64 underflow when a frame split is
+// over-subscribed (more frames requested than bytes available).
+func subSat(a, b uint64) uint64 {
+	if b >= a {
+		return 0
+	}
+	return a - b
 }

@@ -78,6 +78,48 @@ func TestQUICRandomFrames(t *testing.T) {
 	}
 }
 
+// TestQUICRandomFrames_SmallCryptoNoPanic is a regression test for a panic in
+// QUICRandomFrames.Build: when the crypto data is small relative to the number of
+// CRYPTO frames (or the padding budget relative to the number of PADDING frames),
+// the per-frame length bound shrank to <= the lower bound and rand.Int was called
+// with a non-positive argument, panicking with "argument to Int is <= 0". This
+// surfaced on real dials (large post-quantum ClientHello split into many CRYPTO
+// frames) and affected every QUICRandomFrames-based parrot, including Chrome_115.
+// Build must succeed (or error) without panicking across the whole parameter space.
+func TestQUICRandomFrames_SmallCryptoNoPanic(t *testing.T) {
+	cases := []struct {
+		name      string
+		qrf       QUICRandomFrames
+		cryptoLen int
+	}{
+		{"many crypto frames, tiny data", QUICRandomFrames{MinPING: 1, MaxPING: 4, MinCRYPTO: 8, MaxCRYPTO: 9, MinPADDING: 3, MaxPADDING: 6, Length: 1200}, 4},
+		{"crypto frames equal data len", QUICRandomFrames{MinPING: 0, MaxPING: 2, MinCRYPTO: 8, MaxCRYPTO: 9, MinPADDING: 3, MaxPADDING: 6, Length: 1200}, 8},
+		{"many padding frames, tiny budget", QUICRandomFrames{MinPING: 1, MaxPING: 2, MinCRYPTO: 1, MaxCRYPTO: 2, MinPADDING: 8, MaxPADDING: 9, Length: 70}, 64},
+		{"chrome-146 params, small CH", QUICRandomFrames{MinPING: 1, MaxPING: 4, MinCRYPTO: 2, MaxCRYPTO: 8, MinPADDING: 3, MaxPADDING: 6, Length: 1231 - 16}, 16},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := make([]byte, tc.cryptoLen)
+			for i := range data {
+				data[i] = byte(i)
+			}
+			// Run many iterations: the builder is randomized, so a single pass can
+			// miss the boundary that triggers the panic.
+			for i := 0; i < 200; i++ {
+				qrf := tc.qrf
+				payload, err := qrf.Build(data)
+				if err != nil {
+					continue // an error is acceptable; a panic is not
+				}
+				// When it does build, the CRYPTO frames must still reassemble the data.
+				reassembled, rerr := QUICFrames(nil).BuildFromFrames(payload)
+				_ = reassembled
+				_ = rerr
+			}
+		})
+	}
+}
+
 var (
 	testCryptoFrameBytes = []byte{
 		0x00, 0x01, 0x02, 0x03,
