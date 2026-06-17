@@ -339,11 +339,14 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 				CompressionMethods: []uint8{
 					0x0, // no compression
 				},
-				// Chrome's QUIC ClientHello is sent in a FIXED extension order and contains NO
-				// GREASE TLS extensions (GREASE lives only in the transport parameters). This
-				// differs from Chrome's HTTP/2 ClientHello, so the extensions are NOT shuffled
-				// here. Order: [17613, 45, 65037, 10, 16, 43, 0, 13, 27, 57, 51].
-				Extensions: []tls.TLSExtension{
+				// Chrome's QUIC ClientHello contains NO GREASE TLS extensions (GREASE lives only
+				// in the transport parameters) but, like Chrome's HTTP/2 ClientHello, SHUFFLES the
+				// extension order on every connection. Verified 2026-06 against two live Chrome 149
+				// QUIC captures (cmd/fpcapture relay + clienthellod): the 11-extension set is
+				// constant [0,10,13,16,27,43,45,51,57,17613,65037] but the order is fully permuted
+				// per connection — a fixed order would itself be a static tell. So the extensions
+				// are wrapped in ShuffleChromeTLSExtensions, exactly like the QUICChrome_115 parrot.
+				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
 					&tls.ApplicationSettingsExtensionNew{ // application_settings (17613)
 						SupportedProtocols: []string{"h3"},
 					},
@@ -424,7 +427,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 							{Group: tls.X25519},
 						},
 					},
-				},
+				}),
 			},
 		}, nil
 	case QUICFirefox_116A:
