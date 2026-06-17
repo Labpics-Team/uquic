@@ -411,12 +411,13 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 									tls.VERSION_GREASE,
 									tls.VERSION_1,
 								},
-								LegacyID: true,
+								// LegacyID:false → version_information uses the RFC 9368 codepoint
+								// 0x11 (17), matching live Chrome 149; LegacyID:true would emit the
+								// old draft codepoint 0xFF73DB. Verified by the TP differential test.
+								LegacyID: false,
 							},
-							&tls.FakeQUICTransportParameter{ // google_quic_version (0x4752)
-								Id:  0x4752,
-								Val: []byte{0x00, 0x00, 0x00, 0x01}, // Google QUIC version 1
-							},
+							// Chrome 149 no longer sends google_quic_version (0x4752); dropped to
+							// match the captured Chrome 149 transport-parameter fingerprint.
 							&tls.FakeQUICTransportParameter{ // google_connection_options (0x3128)
 								Id:  0x3128,
 								Val: []byte{0x4F, 0x52, 0x49, 0x47}, // "ORIG" — current stable-Chrome default (Chromium kQuicOptions)

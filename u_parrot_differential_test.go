@@ -26,6 +26,14 @@ import (
 // names the culprit instead of only flipping an opaque hash.
 const chrome149QUICNormHexID = "f82151be15528273"
 
+// chrome149QUICTransportParamsHexID is clienthellod's QUIC transport-parameter
+// fingerprint (TransportParameters.HexID). clienthellod sorts the parameter IDs
+// before hashing, so it is order-insensitive and stable across Chrome's
+// per-connection transport-parameter shuffle (verified: identical across two
+// independent captures). This gates the QUIC-transport-layer fingerprint, which
+// the TLS-ClientHello differential above does NOT cover.
+const chrome149QUICTransportParamsHexID = "2f750907435c203d"
+
 var (
 	chrome149QUICNormalizedExtensions = []uint16{0, 10, 13, 16, 27, 43, 45, 51, 57, 17613, 65037}
 	chrome149QUICCipherSuites         = []uint16{4865, 4866, 4867}
@@ -47,14 +55,15 @@ func equalU16(a, b []uint16) bool {
 }
 
 // dialSpecIntoClienthellod dials the given (already-built) QUICSpec at a local
-// clienthellod listener and returns the reconstructed QUIC ClientHello. The
-// listener never answers, so the handshake never completes — but the parrot
-// emits its full Initial flight immediately, which is all clienthellod needs.
+// clienthellod listener and returns the reconstructed gathered initials (TLS
+// ClientHello + QUIC transport parameters). The listener never answers, so the
+// handshake never completes — but the parrot emits its full Initial flight
+// immediately, which is all clienthellod needs.
 //
 // Passing a *pre-built* spec is deliberate: ShuffleChromeTLSExtensions runs once
 // inside QUICID2Spec, and ApplyPreset copies the resulting order verbatim, so a
 // reused spec yields a frozen extension order (see TestChrome146_OrderFrozenWithinOneSpec).
-func dialSpecIntoClienthellod(t *testing.T, spec *QUICSpec) *clienthellod.QUICClientHello {
+func dialSpecIntoClienthellod(t *testing.T, spec *QUICSpec) *clienthellod.GatheredClientInitials {
 	t.Helper()
 
 	lconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -128,11 +137,14 @@ func dialSpecIntoClienthellod(t *testing.T, spec *QUICSpec) *clienthellod.QUICCl
 	if gci.ClientHello == nil {
 		t.Fatal("gathered initials completed but ClientHello is nil")
 	}
-	return gci.ClientHello
+	if gci.TransportParameters == nil {
+		t.Fatal("gathered initials completed but TransportParameters is nil")
+	}
+	return gci
 }
 
 // dialParrotIntoClienthellod builds a FRESH spec (fresh shuffle) and dials it.
-func dialParrotIntoClienthellod(t *testing.T, id QUICID) *clienthellod.QUICClientHello {
+func dialParrotIntoClienthellod(t *testing.T, id QUICID) *clienthellod.GatheredClientInitials {
 	t.Helper()
 	spec, err := QUICID2Spec(id)
 	if err != nil {
@@ -141,14 +153,14 @@ func dialParrotIntoClienthellod(t *testing.T, id QUICID) *clienthellod.QUICClien
 	return dialSpecIntoClienthellod(t, &spec)
 }
 
-// TestChrome146_DifferentialAgainstRealChrome is the load-bearing fidelity gate:
-// the parrot's QUIC ClientHello, packed by uQUIC and parsed by clienthellod, must
-// reproduce the IDENTICAL normalized fingerprint AND decomposed fields as a real
-// captured Chrome 149. An imperfect parrot is worse than none ("parrot is dead"),
-// so this is a hard gate. Asserting the decomposed fields (not just the opaque
-// hash) means a regression names the culprit.
+// TestChrome146_DifferentialAgainstRealChrome is the load-bearing TLS-fidelity
+// gate: the parrot's QUIC ClientHello, packed by uQUIC and parsed by clienthellod,
+// must reproduce the IDENTICAL normalized fingerprint AND decomposed fields as a
+// real captured Chrome 149. An imperfect parrot is worse than none ("parrot is
+// dead"), so this is a hard gate. Asserting the decomposed fields (not just the
+// opaque hash) means a regression names the culprit.
 func TestChrome146_DifferentialAgainstRealChrome(t *testing.T) {
-	ch := dialParrotIntoClienthellod(t, QUICChrome_146)
+	ch := dialParrotIntoClienthellod(t, QUICChrome_146).ClientHello
 
 	if ch.NormHexID != chrome149QUICNormHexID {
 		t.Errorf("parrot normalized fingerprint = %q, want real-Chrome-149 %q", ch.NormHexID, chrome149QUICNormHexID)
@@ -173,6 +185,20 @@ func TestChrome146_DifferentialAgainstRealChrome(t *testing.T) {
 	}
 }
 
+// TestChrome146_TransportParametersMatchRealChrome gates the QUIC transport-
+// parameter fingerprint, which the TLS-ClientHello differential does not cover.
+// JA4_QUIC keys on the TLS ClientHello only, but a censor doing QUIC-transport-
+// parameter fingerprinting would distinguish a mismatched parrot — so for true
+// Chrome fidelity the transport parameters must match too. clienthellod sorts the
+// parameter IDs before hashing, so this fingerprint is order-insensitive.
+func TestChrome146_TransportParametersMatchRealChrome(t *testing.T) {
+	tp := dialParrotIntoClienthellod(t, QUICChrome_146).TransportParameters
+	if tp.HexID != chrome149QUICTransportParamsHexID {
+		t.Errorf("parrot QUIC transport-parameter fingerprint = %q, want real-Chrome-149 %q\n"+
+			"transport-parameter IDs (sorted): %v", tp.HexID, chrome149QUICTransportParamsHexID, tp.QTPIDs)
+	}
+}
+
 // TestChrome146_ExtensionOrderRandomizedPerSpecBuild proves the per-build half of
 // Chrome's order-shuffle: each QUICID2Spec call shuffles afresh, so building the
 // spec per connection yields a different extension order per connection (the
@@ -188,7 +214,7 @@ func TestChrome146_ExtensionOrderRandomizedPerSpecBuild(t *testing.T) {
 	const builds = 6
 	rawIDs := make(map[string]struct{})
 	for i := 0; i < builds; i++ {
-		ch := dialParrotIntoClienthellod(t, QUICChrome_146) // fresh spec each iteration
+		ch := dialParrotIntoClienthellod(t, QUICChrome_146).ClientHello // fresh spec each iteration
 		if ch.NormHexID != chrome149QUICNormHexID {
 			t.Fatalf("build %d: normalized fingerprint drifted to %q, want %q", i, ch.NormHexID, chrome149QUICNormHexID)
 		}
@@ -211,8 +237,8 @@ func TestChrome146_OrderFrozenWithinOneSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QUICID2Spec: %v", err)
 	}
-	first := dialSpecIntoClienthellod(t, &spec).Extensions
-	second := dialSpecIntoClienthellod(t, &spec).Extensions
+	first := dialSpecIntoClienthellod(t, &spec).ClientHello.Extensions
+	second := dialSpecIntoClienthellod(t, &spec).ClientHello.Extensions
 	if !equalU16(first, second) {
 		t.Errorf("same spec produced different extension orders across dials: %v vs %v\n"+
 			"(expected frozen order; if Chrome's shuffle is meant to be per-connection, build the spec per connection)", first, second)
