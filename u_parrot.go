@@ -339,13 +339,18 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 				CompressionMethods: []uint8{
 					0x0, // no compression
 				},
-				// Chrome's QUIC ClientHello contains NO GREASE TLS extensions (GREASE lives only
-				// in the transport parameters) but, like Chrome's HTTP/2 ClientHello, SHUFFLES the
-				// extension order on every connection. Verified 2026-06 against two live Chrome 149
-				// QUIC captures (cmd/fpcapture relay + clienthellod): the 11-extension set is
-				// constant [0,10,13,16,27,43,45,51,57,17613,65037] but the order is fully permuted
-				// per connection — a fixed order would itself be a static tell. So the extensions
-				// are wrapped in ShuffleChromeTLSExtensions, exactly like the QUICChrome_115 parrot.
+				// Chrome's QUIC ClientHello contains NO GREASE TLS extensions (GREASE lives only in
+				// the transport parameters) but, like Chrome's HTTP/2 ClientHello, randomizes its
+				// extension order. Verified 2026-06 against two live Chrome 149 QUIC captures
+				// (parsed by clienthellod): the 11-extension set is constant
+				// [0,10,13,16,27,43,45,51,57,17613,65037] while the order is fully permuted between
+				// connections. ShuffleChromeTLSExtensions reproduces this, exactly like the
+				// QUICChrome_115 parrot — but it shuffles ONCE, when QUICID2Spec is called, and
+				// ApplyPreset then copies the order verbatim. A reused UTransport therefore keeps a
+				// single frozen order for its lifetime; per-connection order variation requires
+				// building the spec per connection (the rotation layer's responsibility). JA4_QUIC
+				// sorts extensions, so order is invisible to it regardless — the shuffle is fidelity
+				// against order-sensitive (JA3-style) fingerprinting, not a JA4 concern.
 				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
 					&tls.ApplicationSettingsExtensionNew{ // application_settings (17613)
 						SupportedProtocols: []string{"h3"},
