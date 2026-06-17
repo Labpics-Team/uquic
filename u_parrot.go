@@ -294,6 +294,10 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 		// to HelloChrome_145_QUIC aliases to HelloChrome_143_QUIC. Byte-validated by sardanioss
 		// against quic.browserleaks.com for Chrome 143 (transport) / 146 (TLS).
 		//
+		// Re-validated 2026-06 against a live Chrome 149.0.7827.104 QUIC capture: the QUIC TLS
+		// ClientHello (the JA4_QUIC surface) is unchanged across 146→149, so this parrot's
+		// normalized fingerprint matches real Chrome 149 (see u_parrot_differential_test.go).
+		//
 		// Re-expressed in refraction-networking/utls types (the pin this repo resolves, which
 		// tops out at the HelloChrome_133 preset) rather than pasted from sardanioss's API. The
 		// pinned utls already exports every primitive Chrome 146 needs — the X25519MLKEM768

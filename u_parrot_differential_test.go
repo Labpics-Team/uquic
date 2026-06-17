@@ -118,9 +118,9 @@ func dialSpecIntoClienthellod(t *testing.T, spec *QUICSpec) *clienthellod.QUICCl
 	}()
 
 	werr := gci.Wait()
-	cancel()         // CH captured (or timed out): stop the dial
-	<-dialDone       // dial goroutine returns before deferred Close (leak detector)
-	close(stopCh)    // and the listener goroutine too, before lconn.Close
+	cancel()      // CH captured (or timed out): stop the dial
+	<-dialDone    // dial goroutine returns before deferred Close (leak detector)
+	close(stopCh) // and the listener goroutine too, before lconn.Close
 	<-listenerDone
 	if werr != nil {
 		t.Fatalf("clienthellod did not reconstruct the parrot ClientHello: %v", werr)
