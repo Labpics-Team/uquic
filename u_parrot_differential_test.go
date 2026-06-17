@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"testing"
@@ -242,5 +243,52 @@ func TestChrome146_OrderFrozenWithinOneSpec(t *testing.T) {
 	if !equalU16(first, second) {
 		t.Errorf("same spec produced different extension orders across dials: %v vs %v\n"+
 			"(expected frozen order; if Chrome's shuffle is meant to be per-connection, build the spec per connection)", first, second)
+	}
+}
+
+// TestChrome146_TransportParameterValuesMatchRealChrome locks the transport-
+// parameter VALUES that clienthellod's TransportParameters.HexID does NOT hash.
+// That fingerprint hashes the values of only the standard RFC parameters plus the
+// sorted set of ALL parameter IDs — so a value-only drift in
+// google_connection_options or max_datagram_frame_size would slip past
+// TestChrome146_TransportParametersMatchRealChrome (verified by adversarial
+// review: changing "ORIG"->"XXXX" or 65536->32768 left that test green). These two
+// are Chrome-specific values — google_connection_options was historically mis-set
+// to "B2ON"/"RVCM" before the correct "ORIG" — so they get a direct regression
+// guard at the spec level.
+func TestChrome146_TransportParameterValuesMatchRealChrome(t *testing.T) {
+	spec, err := QUICID2Spec(QUICChrome_146)
+	if err != nil {
+		t.Fatalf("QUICID2Spec: %v", err)
+	}
+	var qtp *tls.QUICTransportParametersExtension
+	for _, e := range spec.ClientHelloSpec.Extensions {
+		if q, ok := e.(*tls.QUICTransportParametersExtension); ok {
+			qtp = q
+			break
+		}
+	}
+	if qtp == nil {
+		t.Fatal("QUICChrome_146 has no QUICTransportParametersExtension")
+	}
+	byID := make(map[uint64]tls.TransportParameter, len(qtp.TransportParameters))
+	for _, p := range qtp.TransportParameters {
+		byID[p.ID()] = p
+	}
+
+	// google_connection_options (0x3128) must carry "ORIG" (real Chrome 149).
+	const googleConnectionOptions = 0x3128
+	if g, ok := byID[googleConnectionOptions]; !ok {
+		t.Errorf("google_connection_options (0x3128) is absent")
+	} else if !bytes.Equal(g.Value(), []byte("ORIG")) {
+		t.Errorf("google_connection_options = %q, want %q", g.Value(), "ORIG")
+	}
+
+	// max_datagram_frame_size (0x20) must encode 65536 (real Chrome 149).
+	const maxDatagramFrameSize = 0x20
+	if d, ok := byID[maxDatagramFrameSize]; !ok {
+		t.Errorf("max_datagram_frame_size (0x20) is absent")
+	} else if want := tls.MaxDatagramFrameSize(65536).Value(); !bytes.Equal(d.Value(), want) {
+		t.Errorf("max_datagram_frame_size value = %v, want %v (65536)", d.Value(), want)
 	}
 }
