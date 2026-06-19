@@ -23,7 +23,7 @@ transport-parameter fingerprint against a captured Chrome 149).
 
 ## Dependency direction
 
-```
+```text
 refraction-networking/uquic (this fork)   <-- QUIC Initial-Packet fingerprint
         |  imported by
         v
@@ -62,7 +62,7 @@ with a malformed ClientHello. Therefore:
   without a code change there.
 - Existing validated parrots (`QUICChrome_115`, `QUICFirefox_116`, …) are kept
   for reference and reproducibility; their **bytes are not to be modified** —
-  re-validating an old version against a browser that has moved on would only
+  re-validating an outdated version against a browser that has moved on would only
   weaken them.
 
 ### Consuming the current parrot
