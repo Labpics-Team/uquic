@@ -24,6 +24,13 @@ For anyone intending to use this library for censorship circumvention, please be
 
 If you are interested in our research, please stay tuned for our paper.
 
+> **Labpics fork note.** This fork is the QUIC-fingerprint foundation for Ametyst
+> (`lemone112/vpn`) and, through it, the Phantom & Serverless integration. The
+> parrot-freshness contract, the dependency direction, and the (inherited)
+> research-grade disclaimer are documented in
+> [`docs/ametyst-integration.md`](docs/ametyst-integration.md). Consumers that
+> want the current validated Chrome parrot can use `quic.CurrentChromeParrot()`.
+
 # Development in Progress
 
 ## Development Roadmap

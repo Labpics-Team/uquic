@@ -50,6 +50,23 @@ var (
 	// TODO: add more QUIC clients and versions
 )
 
+// CurrentChromeParrot returns the QUICID of the Chrome parrot that this fork
+// currently considers byte-validated against a live Chrome build (see the
+// QUICChrome_146 doc comment and u_parrot_differential_test.go for the gate).
+//
+// It exists so a consumer (e.g. the Ametyst MASQUE transport in lemone112/vpn)
+// can resolve "the current, validated Chrome fingerprint" without hardcoding a
+// version-specific identifier. When the parrot is refreshed to a newer Chrome,
+// this accessor is repointed in lockstep with the differential test, so the
+// freshness contract has a single source of truth and consumers need no change.
+//
+// This is a convenience accessor only; it returns one of the package-level
+// QUICID values and resolves the same spec as QUICID2Spec(CurrentChromeParrot()).
+// See docs/ametyst-integration.md for the dependency direction and contract.
+func CurrentChromeParrot() QUICID {
+	return QUICChrome_146
+}
+
 func QUICID2Spec(id QUICID) (QUICSpec, error) {
 	switch id {
 	case QUICChrome_115_IPv4:
