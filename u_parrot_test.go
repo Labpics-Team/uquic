@@ -41,6 +41,31 @@ func TestDialPanic(t *testing.T) {
 
 }
 
+// TestCurrentChromeParrot pins the freshness-contract accessor: it must return a
+// Chrome QUICID that resolves to a valid spec via QUICID2Spec, so consumers (the
+// Ametyst MASQUE transport in lemone112/vpn) can track the current validated
+// Chrome parrot without hardcoding a version. The concrete value is intentionally
+// asserted so that repointing the accessor to a newer Chrome is a deliberate,
+// reviewed change made in lockstep with the differential test.
+func TestCurrentChromeParrot(t *testing.T) {
+	id := CurrentChromeParrot()
+
+	if id.Client != quicChrome {
+		t.Errorf("CurrentChromeParrot().Client = %q, want %q", id.Client, quicChrome)
+	}
+	if id != QUICChrome_146 {
+		t.Errorf("CurrentChromeParrot() = %v, want QUICChrome_146 %v", id, QUICChrome_146)
+	}
+
+	spec, err := QUICID2Spec(id)
+	if err != nil {
+		t.Fatalf("QUICID2Spec(CurrentChromeParrot()) returned error: %v", err)
+	}
+	if spec.ClientHelloSpec == nil {
+		t.Fatal("CurrentChromeParrot() spec has a nil ClientHelloSpec")
+	}
+}
+
 // TestQUICID2Spec_Chrome146 locks the invariants the Chrome 146 parrot must satisfy:
 // a spec is returned without error, its ClientHelloSpec carries a
 // QUICTransportParametersExtension (without it u_connection.go panics at runtime), and
