@@ -205,6 +205,9 @@ type Connection interface {
 	// If the payload is too large to be sent at the current time, a DatagramTooLargeError is returned.
 	SendDatagram(payload []byte) error
 	// ReceiveDatagram gets a message received in a datagram, as specified in RFC 9221.
+	// If Config.MaxIncomingDatagramPayloadSize is set and a peer sends a larger
+	// payload, ReceiveDatagram returns a DatagramTooLargeError without allocating
+	// a receive buffer for that payload.
 	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
@@ -339,7 +342,13 @@ type Config struct {
 	Allow0RTT bool
 	// Enable QUIC datagram support (RFC 9221).
 	EnableDatagrams bool
-	Tracer          func(context.Context, logging.Perspective, ConnectionID) *logging.ConnectionTracer
+	// MaxIncomingDatagramPayloadSize limits the DATAGRAM payload copied into the
+	// application receive queue. A zero value uses the implementation default.
+	// A payload above a positive limit is discarded before the receive-buffer copy
+	// and reported by ReceiveDatagram as a DatagramTooLargeError. Negative values
+	// are invalid.
+	MaxIncomingDatagramPayloadSize int64
+	Tracer                         func(context.Context, logging.Perspective, ConnectionID) *logging.ConnectionTracer
 }
 
 // ClientHelloInfo contains information about an incoming connection attempt.
@@ -362,6 +371,12 @@ type ConnectionState struct {
 	// This is a unilateral declaration by the peer - receiving datagrams is only possible if
 	// datagram support was enabled locally via Config.EnableDatagrams.
 	SupportsDatagrams bool
+	// MaxDatagramPayloadSize is the current maximum payload accepted by
+	// SendDatagram. It is zero if the peer didn't advertise DATAGRAM support.
+	// The value can change during the connection lifetime as path MTU discovery
+	// updates the available packet size, so callers must read a fresh
+	// ConnectionState instead of caching it for the whole connection.
+	MaxDatagramPayloadSize int
 	// Used0RTT says if 0-RTT resumption was used.
 	Used0RTT bool
 	// Version is the QUIC version of the QUIC connection.

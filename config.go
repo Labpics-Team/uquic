@@ -45,6 +45,9 @@ func validateConfig(config *Config) error {
 	if config.InitialPacketSize > protocol.MaxPacketBufferSize {
 		config.InitialPacketSize = protocol.MaxPacketBufferSize
 	}
+	if config.MaxIncomingDatagramPayloadSize < 0 {
+		return fmt.Errorf("invalid maximum incoming datagram payload size: %d", config.MaxIncomingDatagramPayloadSize)
+	}
 	// check that all QUIC versions are actually supported
 	for _, v := range config.Versions {
 		if !protocol.IsValidVersion(v) {
@@ -120,6 +123,7 @@ func populateConfig(config *Config) *Config {
 		MaxIncomingUniStreams:          maxIncomingUniStreams,
 		TokenStore:                     config.TokenStore,
 		EnableDatagrams:                config.EnableDatagrams,
+		MaxIncomingDatagramPayloadSize: config.MaxIncomingDatagramPayloadSize,
 		InitialPacketSize:              initialPacketSize,
 		DisablePathMTUDiscovery:        config.DisablePathMTUDiscovery,
 		Allow0RTT:                      config.Allow0RTT,

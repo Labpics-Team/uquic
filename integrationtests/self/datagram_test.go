@@ -111,6 +111,7 @@ func TestDatagramSizeLimit(t *testing.T) {
 	var sizeErr *quic.DatagramTooLargeError
 	require.ErrorAs(t, err, &sizeErr)
 	require.InDelta(t, sizeErr.MaxDatagramPayloadSize, maxDatagramSize, 10)
+	require.Equal(t, int(sizeErr.MaxDatagramPayloadSize), clientConn.ConnectionState().MaxDatagramPayloadSize)
 
 	require.NoError(t, clientConn.SendDatagram(bytes.Repeat([]byte("b"), int(sizeErr.MaxDatagramPayloadSize))))
 	require.Error(t, clientConn.SendDatagram(bytes.Repeat([]byte("c"), int(sizeErr.MaxDatagramPayloadSize+1))))
@@ -121,6 +122,44 @@ func TestDatagramSizeLimit(t *testing.T) {
 	datagram, err := serverConn.ReceiveDatagram(ctx)
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte("b"), int(sizeErr.MaxDatagramPayloadSize)), datagram)
+}
+
+func TestIncomingDatagramPayloadLimit(t *testing.T) {
+	server, err := quic.Listen(
+		newUPDConnLocalhost(t),
+		getTLSConfig(),
+		getQuicConfig(&quic.Config{EnableDatagrams: true, MaxIncomingDatagramPayloadSize: 3}),
+	)
+	require.NoError(t, err)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	clientConn, err := quic.Dial(
+		ctx,
+		newUPDConnLocalhost(t),
+		server.Addr(),
+		getTLSClientConfig(),
+		getQuicConfig(&quic.Config{EnableDatagrams: true}),
+	)
+	require.NoError(t, err)
+	defer clientConn.CloseWithError(0, "")
+
+	serverConn, err := server.Accept(ctx)
+	require.NoError(t, err)
+	defer serverConn.CloseWithError(0, "")
+
+	require.NoError(t, clientConn.SendDatagram([]byte("four")))
+	data, err := serverConn.ReceiveDatagram(ctx)
+	require.Nil(t, data)
+	var sizeErr *quic.DatagramTooLargeError
+	require.ErrorAs(t, err, &sizeErr)
+	require.EqualValues(t, 3, sizeErr.MaxDatagramPayloadSize)
+
+	require.NoError(t, clientConn.SendDatagram([]byte("ok")))
+	data, err = serverConn.ReceiveDatagram(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []byte("ok"), data)
 }
 
 func TestDatagramLoss(t *testing.T) {

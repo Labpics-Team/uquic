@@ -65,6 +65,11 @@ func TestConfigValidation(t *testing.T) {
 		require.NoError(t, validateConfig(conf))
 		require.Equal(t, uint16(protocol.MaxPacketBufferSize), conf.InitialPacketSize)
 	})
+
+	t.Run("incoming datagram payload limit", func(t *testing.T) {
+		conf := &Config{MaxIncomingDatagramPayloadSize: -1}
+		require.Error(t, validateConfig(conf))
+	})
 }
 
 func TestConfigHandshakeIdleTimeout(t *testing.T) {
@@ -118,6 +123,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(time.Second))
 		case "EnableDatagrams":
 			f.Set(reflect.ValueOf(true))
+		case "MaxIncomingDatagramPayloadSize":
+			f.Set(reflect.ValueOf(int64(1234)))
 		case "DisableVersionNegotiationPackets":
 			f.Set(reflect.ValueOf(true))
 		case "InitialPacketSize":

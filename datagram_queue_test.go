@@ -14,7 +14,7 @@ import (
 
 func TestDatagramQueuePeekAndPop(t *testing.T) {
 	var queued []struct{}
-	queue := newDatagramQueue(func() { queued = append(queued, struct{}{}) }, utils.DefaultLogger)
+	queue := newDatagramQueue(func() { queued = append(queued, struct{}{}) }, utils.DefaultLogger, 0)
 	require.Nil(t, queue.Peek())
 	require.Empty(t, queued)
 	require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte("foo")}))
@@ -27,7 +27,7 @@ func TestDatagramQueuePeekAndPop(t *testing.T) {
 }
 
 func TestDatagramQueueSendQueueLength(t *testing.T) {
-	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
 
 	for i := 0; i < maxDatagramSendQueueLen; i++ {
 		require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte{0}}))
@@ -67,7 +67,7 @@ func TestDatagramQueueSendQueueLength(t *testing.T) {
 }
 
 func TestDatagramQueueReceive(t *testing.T) {
-	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
 
 	// receive frames that were received earlier
 	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("foo")})
@@ -80,8 +80,20 @@ func TestDatagramQueueReceive(t *testing.T) {
 	require.Equal(t, []byte("bar"), data)
 }
 
+func TestDatagramQueueReportsOversizedReceiveWithoutBufferingPayload(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 3)
+	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("four")})
+
+	data, err := queue.Receive(context.Background())
+	require.Nil(t, data)
+	var sizeErr *DatagramTooLargeError
+	require.ErrorAs(t, err, &sizeErr)
+	require.Equal(t, int64(3), sizeErr.MaxDatagramPayloadSize)
+	require.Empty(t, queue.rcvQueue)
+}
+
 func TestDatagramQueueReceiveBlocking(t *testing.T) {
-	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
 
 	// block until a new frame is received
 	type result struct {
@@ -130,7 +142,7 @@ func TestDatagramQueueReceiveBlocking(t *testing.T) {
 }
 
 func TestDatagramQueueClose(t *testing.T) {
-	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
 
 	for i := 0; i < maxDatagramSendQueueLen; i++ {
 		require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte{0}}))

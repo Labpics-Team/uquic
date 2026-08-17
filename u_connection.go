@@ -74,7 +74,7 @@ var newUClientConnection = func(
 		s.tracer,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentMTUEstimate.Store(uint32(protocol.ByteCount(s.config.InitialPacketSize)))
 	// [UQUIC]
 	if uSpec.InitialPacketSpec.InitPacketNumberLength != 0 {
 		ackhandler.SetInitialPacketNumberLength(s.sentPacketHandler, uSpec.InitialPacketSpec.InitPacketNumberLength)

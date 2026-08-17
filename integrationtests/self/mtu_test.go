@@ -166,6 +166,7 @@ func TestPathMTUDiscovery(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorAs(t, err, &datagramErr)
 	finalMaxDatagramSize := datagramErr.MaxDatagramPayloadSize
+	require.Equal(t, int(finalMaxDatagramSize), conn.ConnectionState().MaxDatagramPayloadSize)
 
 	mx.Lock()
 	defer mx.Unlock()

@@ -19,9 +19,11 @@ type datagramQueue struct {
 	sendQueue ringbuffer.RingBuffer[*wire.DatagramFrame]
 	sent      chan struct{} // used to notify Add that a datagram was dequeued
 
-	rcvMx    sync.Mutex
-	rcvQueue [][]byte
-	rcvd     chan struct{} // used to notify Receive that a new datagram was received
+	rcvMx                          sync.Mutex
+	rcvQueue                       [][]byte
+	rcvd                           chan struct{} // used to notify Receive that a new datagram was received
+	rcvErr                         error
+	maxIncomingDatagramPayloadSize int64
 
 	closeErr error
 	closed   chan struct{}
@@ -31,13 +33,14 @@ type datagramQueue struct {
 	logger utils.Logger
 }
 
-func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
+func newDatagramQueue(hasData func(), logger utils.Logger, maxIncomingDatagramPayloadSize int64) *datagramQueue {
 	return &datagramQueue{
-		hasData: hasData,
-		rcvd:    make(chan struct{}, 1),
-		sent:    make(chan struct{}, 1),
-		closed:  make(chan struct{}),
-		logger:  logger,
+		hasData:                        hasData,
+		rcvd:                           make(chan struct{}, 1),
+		sent:                           make(chan struct{}, 1),
+		closed:                         make(chan struct{}),
+		logger:                         logger,
+		maxIncomingDatagramPayloadSize: maxIncomingDatagramPayloadSize,
 	}
 }
 
@@ -91,6 +94,25 @@ func (h *datagramQueue) Pop() {
 
 // HandleDatagramFrame handles a received DATAGRAM frame.
 func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
+	payloadLen := int64(len(f.Data))
+	h.rcvMx.Lock()
+	maxPayloadSize := h.maxIncomingDatagramPayloadSize
+	if maxPayloadSize > 0 && payloadLen > maxPayloadSize {
+		if h.rcvErr == nil {
+			h.rcvErr = &DatagramTooLargeError{MaxDatagramPayloadSize: maxPayloadSize}
+			select {
+			case h.rcvd <- struct{}{}:
+			default:
+			}
+		}
+		h.rcvMx.Unlock()
+		if h.logger.Debug() {
+			h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload, maximum %d)", payloadLen, maxPayloadSize)
+		}
+		return
+	}
+	h.rcvMx.Unlock()
+
 	data := make([]byte, len(f.Data))
 	copy(data, f.Data)
 	var queued bool
@@ -113,6 +135,12 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 	for {
 		h.rcvMx.Lock()
+		if h.rcvErr != nil {
+			err := h.rcvErr
+			h.rcvErr = nil
+			h.rcvMx.Unlock()
+			return nil, err
+		}
 		if len(h.rcvQueue) > 0 {
 			data := h.rcvQueue[0]
 			h.rcvQueue = h.rcvQueue[1:]

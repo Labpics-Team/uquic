@@ -287,7 +287,7 @@ var newConnection = func(
 		s.tracer,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentMTUEstimate.Store(uint32(protocol.ByteCount(s.config.InitialPacketSize)))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:   protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -400,7 +400,7 @@ var newClientConnection = func(
 		s.tracer,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentMTUEstimate.Store(uint32(protocol.ByteCount(s.config.InitialPacketSize)))
 	oneRTTStream := newCryptoStream()
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiRemote: protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -499,7 +499,7 @@ func (s *connection) preSetup() {
 	s.lastPacketReceivedTime = now
 	s.creationTime = now
 
-	s.datagramQueue = newDatagramQueue(s.scheduleSending, s.logger)
+	s.datagramQueue = newDatagramQueue(s.scheduleSending, s.logger, s.config.MaxIncomingDatagramPayloadSize)
 	s.connState.Version = s.version
 }
 
@@ -698,7 +698,7 @@ func (s *connection) Context() context.Context {
 }
 
 func (s *connection) supportsDatagrams() bool {
-	return s.peerParams.MaxDatagramFrameSize > 0
+	return s.peerParams != nil && s.peerParams.MaxDatagramFrameSize > 0
 }
 
 func (s *connection) ConnectionState() ConnectionState {
@@ -708,6 +708,7 @@ func (s *connection) ConnectionState() ConnectionState {
 	s.connState.TLS = cs.ConnectionState
 	s.connState.Used0RTT = cs.Used0RTT
 	s.connState.GSO = s.conn.capabilities().GSO
+	s.connState.MaxDatagramPayloadSize = int(s.maxDatagramPayloadSize())
 	return s.connState
 }
 
@@ -1053,6 +1054,10 @@ func (s *connection) handleShortHeaderPacket(p receivedPacket) (wasProcessed boo
 			protocol.ByteCount(s.config.InitialPacketSize),
 			maxPacketSize,
 		)
+		// The new path has not proven the previous path's MTU. Publish the
+		// conservative initial size immediately; later acknowledged probes may
+		// raise it again.
+		s.currentMTUEstimate.Store(uint32(s.config.InitialPacketSize))
 		s.conn.ChangeRemoteAddr(p.remoteAddr, p.info)
 	}
 	return true, nil
@@ -2500,20 +2505,27 @@ func (s *connection) SendDatagram(p []byte) error {
 	if !s.supportsDatagrams() {
 		return errors.New("datagram support disabled")
 	}
-
-	f := &wire.DatagramFrame{DataLenPresent: true}
-	// The payload size estimate is conservative.
-	// Under many circumstances we could send a few more bytes.
-	maxDataLen := min(
-		f.MaxDataLen(s.peerParams.MaxDatagramFrameSize, s.version),
-		protocol.ByteCount(s.currentMTUEstimate.Load()),
-	)
+	maxDataLen := s.maxDatagramPayloadSize()
 	if protocol.ByteCount(len(p)) > maxDataLen {
 		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
 	}
+	f := &wire.DatagramFrame{DataLenPresent: true}
 	f.Data = make([]byte, len(p))
 	copy(f.Data, p)
 	return s.datagramQueue.Add(f)
+}
+
+func (s *connection) maxDatagramPayloadSize() protocol.ByteCount {
+	if !s.supportsDatagrams() {
+		return 0
+	}
+	f := &wire.DatagramFrame{DataLenPresent: true}
+	// The payload size estimate is conservative. Under many circumstances we
+	// could send a few more bytes.
+	return min(
+		f.MaxDataLen(s.peerParams.MaxDatagramFrameSize, s.version),
+		estimateMaxPayloadSize(protocol.ByteCount(s.currentMTUEstimate.Load())),
+	)
 }
 
 func (s *connection) ReceiveDatagram(ctx context.Context) ([]byte, error) {
@@ -2543,5 +2555,9 @@ func (s *connection) NextConnection(ctx context.Context) (Connection, error) {
 // It is not very sophisticated: it just subtracts the size of header (assuming the maximum
 // connection ID length), and the size of the encryption tag.
 func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
-	return mtu - 1 /* type byte */ - 20 /* maximum connection ID length */ - 16 /* tag size */
+	const overhead = 1 /* type byte */ + 20 /* maximum connection ID length */ + 16 /* tag size */
+	if mtu <= overhead {
+		return 0
+	}
+	return mtu - overhead
 }
