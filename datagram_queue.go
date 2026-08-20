@@ -143,22 +143,22 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 		return
 	}
 
+	h.rcvMx.Lock()
+	if len(h.rcvQueue) >= maxDatagramRcvQueueLen {
+		h.rcvMx.Unlock()
+		if h.logger.Debug() {
+			h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
+		}
+		return
+	}
 	data := make([]byte, len(f.Data))
 	copy(data, f.Data)
-	var queued bool
-	h.rcvMx.Lock()
-	if len(h.rcvQueue) < maxDatagramRcvQueueLen {
-		h.rcvQueue = append(h.rcvQueue, data)
-		queued = true
-		select {
-		case h.rcvd <- struct{}{}:
-		default:
-		}
+	h.rcvQueue = append(h.rcvQueue, data)
+	select {
+	case h.rcvd <- struct{}{}:
+	default:
 	}
 	h.rcvMx.Unlock()
-	if !queued && h.logger.Debug() {
-		h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
-	}
 }
 
 // Receive gets a received DATAGRAM frame.

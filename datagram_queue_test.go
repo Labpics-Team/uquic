@@ -192,7 +192,9 @@ func TestDatagramQueueReceive(t *testing.T) {
 	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
 
 	// receive frames that were received earlier
-	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("foo")})
+	packetBackedPayload := []byte("foo")
+	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: packetBackedPayload})
+	packetBackedPayload[0] = 'x'
 	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("bar")})
 	data, err := queue.Receive(context.Background())
 	require.NoError(t, err)
@@ -217,6 +219,20 @@ func TestDatagramQueueDropsOversizedReceiveWithoutBufferingPayload(t *testing.T)
 	data, err = queue.Receive(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []byte("ok"), data)
+}
+
+func TestDatagramQueueFullReceiveDropDoesNotCopyPayload(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	for i := 0; i < maxDatagramRcvQueueLen; i++ {
+		queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte{byte(i)}})
+	}
+
+	frame := &wire.DatagramFrame{Data: make([]byte, 64*1024)}
+	allocs := testing.AllocsPerRun(100, func() {
+		queue.HandleDatagramFrame(frame)
+	})
+	require.Zero(t, allocs, "a full receive queue must reject before copying packet-backed payload")
+	require.Len(t, queue.rcvQueue, maxDatagramRcvQueueLen)
 }
 
 func TestDatagramQueueReceiveBlocking(t *testing.T) {
