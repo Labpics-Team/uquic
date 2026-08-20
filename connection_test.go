@@ -2869,6 +2869,7 @@ func testConnectionPathValidation(t *testing.T, isNATRebinding bool) {
 		connectionOptRTT(time.Second),
 	)
 	require.NoError(t, tc.conn.handleTransportParameters(&wire.TransportParameters{MaxUDPPayloadSize: 1456}))
+	tc.conn.setCurrentMTUEstimate(1450)
 
 	newRemoteAddr := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 1234}
 	require.NotEqual(t, tc.remoteAddr, newRemoteAddr)
@@ -2984,6 +2985,7 @@ func testConnectionPathValidation(t *testing.T, isNATRebinding bool) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
+	require.Equal(t, uint32(tc.conn.config.InitialPacketSize), tc.conn.currentMTUEstimate.Load())
 
 	// test teardown
 	tc.connRunner.EXPECT().Remove(gomock.Any()).AnyTimes()

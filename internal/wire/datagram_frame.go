@@ -39,8 +39,10 @@ func parseDatagramFrame(b []byte, typ uint64, _ protocol.Version) (*DatagramFram
 	} else {
 		length = uint64(len(b))
 	}
-	f.Data = make([]byte, length)
-	copy(f.Data, b)
+	// The parser owns no payload storage. The connection handles the frame before
+	// releasing the packet buffer, and the receive queue copies only payloads that
+	// pass its configured admission limit.
+	f.Data = b[:length]
 	return f, startLen - len(b) + int(length), nil
 }
 

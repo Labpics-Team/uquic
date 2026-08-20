@@ -28,6 +28,22 @@ func TestParseDatagramFrameWithoutLength(t *testing.T) {
 	require.Equal(t, len(data), l)
 }
 
+func TestFrameParserReferencesDatagramPayloadWithoutCopy(t *testing.T) {
+	parser := NewFrameParser(true)
+	data := []byte{0x31, 0x04, 'f', 'o', 'u', 'r'}
+
+	consumed, frame, err := parser.ParseNext(data, protocol.Encryption1RTT, protocol.Version1)
+	require.NoError(t, err)
+	require.Equal(t, len(data), consumed)
+	datagram := frame.(*DatagramFrame)
+	require.Equal(t, []byte("four"), datagram.Data)
+	require.Equal(t, &data[2], &datagram.Data[0])
+	encoded, err := datagram.Append(nil, protocol.Version1)
+	require.NoError(t, err)
+	require.Equal(t, data, encoded)
+	require.Equal(t, protocol.ByteCount(len(encoded)), datagram.Length(protocol.Version1))
+}
+
 func TestParseDatagramFrameErrorsOnLengthLongerThanFrame(t *testing.T) {
 	data := encodeVarInt(0x6) // length
 	data = append(data, []byte("fooba")...)

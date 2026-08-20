@@ -36,13 +36,28 @@ type testPacketPacker struct {
 func newTestPacketPacker(t *testing.T, mockCtrl *gomock.Controller, pers protocol.Perspective) *testPacketPacker {
 	destConnID := protocol.ParseConnectionID([]byte{1, 2, 3, 4})
 	require.Equal(t, testPackerConnIDLen, destConnID.Len())
+	return newTestPacketPackerWithDestConnID(
+		t,
+		mockCtrl,
+		pers,
+		destConnID,
+	)
+}
+
+func newTestPacketPackerWithDestConnID(
+	t *testing.T,
+	mockCtrl *gomock.Controller,
+	pers protocol.Perspective,
+	destConnID protocol.ConnectionID,
+) *testPacketPacker {
 	initialStream := newCryptoStream()
 	handshakeStream := newCryptoStream()
 	pnManager := mockackhandler.NewMockSentPacketHandler(mockCtrl)
 	framer := NewMockFrameSource(mockCtrl)
 	ackFramer := NewMockAckFrameSource(mockCtrl)
 	sealingManager := NewMockSealingManager(mockCtrl)
-	datagramQueue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	datagramQueue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	datagramQueue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
 	retransmissionQueue := newRetransmissionQueue()
 	return &testPacketPacker{
 		pnManager:           pnManager,
@@ -71,9 +86,13 @@ func newTestPacketPacker(t *testing.T, mockCtrl *gomock.Controller, pers protoco
 
 // newMockShortHeaderSealer returns a mock short header sealer that seals a short header packet
 func newMockShortHeaderSealer(mockCtrl *gomock.Controller) *mocks.MockShortHeaderSealer {
+	return newMockShortHeaderSealerWithOverhead(mockCtrl, 7)
+}
+
+func newMockShortHeaderSealerWithOverhead(mockCtrl *gomock.Controller, overhead int) *mocks.MockShortHeaderSealer {
 	sealer := mocks.NewMockShortHeaderSealer(mockCtrl)
 	sealer.EXPECT().KeyPhase().Return(protocol.KeyPhaseOne).AnyTimes()
-	sealer.EXPECT().Overhead().Return(7).AnyTimes()
+	sealer.EXPECT().Overhead().Return(overhead).AnyTimes()
 	sealer.EXPECT().EncryptHeader(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
 	sealer.EXPECT().Seal(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(dst, src []byte, pn protocol.PacketNumber, associatedData []byte) []byte {
 		return append(src, bytes.Repeat([]byte{'s'}, sealer.Overhead())...)
@@ -576,6 +595,43 @@ func TestPackDatagramFrames(t *testing.T) {
 	require.IsType(t, &wire.DatagramFrame{}, p.Frames[0].Frame)
 	require.Equal(t, []byte("foobar"), p.Frames[0].Frame.(*wire.DatagramFrame).Data)
 	require.NotEmpty(t, buffer.Data)
+}
+
+func TestPublishedMaxDatagramPayloadFitsPacketBudget(t *testing.T) {
+	const maxPacketSize = protocol.ByteCount(1200)
+	maxConnID := protocol.ParseConnectionID(bytes.Repeat([]byte{0x42}, protocol.MaxConnIDLen))
+	publishedMax := maxDatagramPayloadSize(wire.MaxDatagramSize, maxPacketSize, protocol.Version1)
+
+	for _, tc := range []struct {
+		name  string
+		pnLen protocol.PacketNumberLen
+	}{
+		{name: "one-byte packet number reproducer", pnLen: protocol.PacketNumberLen1},
+		{name: "worst-case packet number", pnLen: protocol.PacketNumberLen4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			tp := newTestPacketPackerWithDestConnID(t, mockCtrl, protocol.PerspectiveServer, maxConnID)
+			require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{
+				DataLenPresent: true,
+				Data:           make([]byte, publishedMax),
+			}))
+			tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
+			tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), tc.pnLen)
+			tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42))
+			tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealerWithOverhead(mockCtrl, 16), nil)
+			tp.framer.EXPECT().HasData()
+			buffer := getPacketBuffer()
+			p, err := tp.packer.AppendPacket(buffer, maxPacketSize, time.Now(), protocol.Version1)
+			require.NoError(t, err)
+			require.Len(t, p.Frames, 1)
+			require.IsType(t, &wire.DatagramFrame{}, p.Frames[0].Frame)
+			require.LessOrEqual(t, buffer.Len(), maxPacketSize)
+			if tc.pnLen == protocol.PacketNumberLen4 {
+				require.Equal(t, maxPacketSize, buffer.Len())
+			}
+		})
+	}
 }
 
 func TestPackLargeDatagramFrame(t *testing.T) {

@@ -603,7 +603,7 @@ var _ = Describe("Server", func() {
 				close(acceptConn)
 				Eventually(
 					func() uint32 { return counter.Load() },
-					scaleDuration(100*time.Millisecond),
+					scaleDuration(time.Second),
 				).Should(BeEquivalentTo(protocol.MaxServerUnprocessedPackets + 1))
 				Consistently(func() uint32 { return counter.Load() }).Should(BeEquivalentTo(protocol.MaxServerUnprocessedPackets + 1))
 			})
@@ -1061,6 +1061,27 @@ var _ = Describe("Server", func() {
 
 			It("rejects a connection attempt when GetConfigClient returns an error", func() {
 				serv.config = populateConfig(&Config{GetConfigForClient: func(*ClientHelloInfo) (*Config, error) { return nil, errors.New("rejected") }})
+
+				phm.EXPECT().Get(gomock.Any())
+				done := make(chan struct{})
+				tracer.EXPECT().SentPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any())
+				conn.EXPECT().WriteTo(gomock.Any(), gomock.Any()).DoAndReturn(func(b []byte, _ net.Addr) (int, error) {
+					defer close(done)
+					rejectHdr := parseHeader(b)
+					Expect(rejectHdr.Type).To(Equal(protocol.PacketTypeInitial))
+					return len(b), nil
+				})
+				serv.handleInitialImpl(
+					receivedPacket{buffer: getPacketBuffer()},
+					&wire.Header{DestConnectionID: protocol.ParseConnectionID([]byte{1, 2, 3, 4, 5, 6, 7, 8}), Version: protocol.Version1},
+				)
+				Eventually(done).Should(BeClosed())
+			})
+
+			It("rejects a connection attempt when GetConfigClient returns an invalid config", func() {
+				serv.config = populateConfig(&Config{GetConfigForClient: func(*ClientHelloInfo) (*Config, error) {
+					return &Config{MaxIncomingDatagramPayloadSize: -1}, nil
+				}})
 
 				phm.EXPECT().Get(gomock.Any())
 				done := make(chan struct{})
