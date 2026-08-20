@@ -196,7 +196,8 @@ type connection struct {
 	// pacingDeadline is the time when the next packet should be sent
 	pacingDeadline time.Time
 
-	peerParams *wire.TransportParameters
+	peerParams               *wire.TransportParameters
+	peerMaxDatagramFrameSize atomic.Int64
 
 	timer connectionTimer
 	// keepAlivePingSent stores whether a keep alive PING is in flight.
@@ -287,7 +288,7 @@ var newConnection = func(
 		s.tracer,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(protocol.ByteCount(s.config.InitialPacketSize)))
+	s.setCurrentMTUEstimate(protocol.ByteCount(s.config.InitialPacketSize))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:   protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -400,7 +401,7 @@ var newClientConnection = func(
 		s.tracer,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(protocol.ByteCount(s.config.InitialPacketSize)))
+	s.setCurrentMTUEstimate(protocol.ByteCount(s.config.InitialPacketSize))
 	oneRTTStream := newCryptoStream()
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiRemote: protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -697,18 +698,20 @@ func (s *connection) Context() context.Context {
 	return s.ctx
 }
 
-func (s *connection) supportsDatagrams() bool {
-	return s.peerParams != nil && s.peerParams.MaxDatagramFrameSize > 0
-}
-
 func (s *connection) ConnectionState() ConnectionState {
 	s.connStateMutex.Lock()
 	defer s.connStateMutex.Unlock()
 	cs := s.cryptoStreamHandler.ConnectionState()
+	peerMaxDatagramFrameSize := protocol.ByteCount(s.peerMaxDatagramFrameSize.Load())
 	s.connState.TLS = cs.ConnectionState
 	s.connState.Used0RTT = cs.Used0RTT
 	s.connState.GSO = s.conn.capabilities().GSO
-	s.connState.MaxDatagramPayloadSize = int(s.maxDatagramPayloadSize())
+	s.connState.SupportsDatagrams = peerMaxDatagramFrameSize >= minLengthBearingDatagramFrameSize
+	s.connState.MaxDatagramPayloadSize = int(maxDatagramPayloadSize(
+		peerMaxDatagramFrameSize,
+		protocol.ByteCount(s.currentMTUEstimate.Load()),
+		s.version,
+	))
 	return s.connState
 }
 
@@ -1057,7 +1060,7 @@ func (s *connection) handleShortHeaderPacket(p receivedPacket) (wasProcessed boo
 		// The new path has not proven the previous path's MTU. Publish the
 		// conservative initial size immediately; later acknowledged probes may
 		// raise it again.
-		s.currentMTUEstimate.Store(uint32(s.config.InitialPacketSize))
+		s.setCurrentMTUEstimate(protocol.ByteCount(s.config.InitialPacketSize))
 		s.conn.ChangeRemoteAddr(p.remoteAddr, p.info)
 	}
 	return true, nil
@@ -1711,7 +1714,7 @@ func (s *connection) handleAckFrame(frame *wire.AckFrame, encLevel protocol.Encr
 	// If one of the acknowledged packets was a Path MTU probe packet, this might have increased the Path MTU estimate.
 	if s.mtuDiscoverer != nil {
 		if mtu := s.mtuDiscoverer.CurrentSize(); mtu > protocol.ByteCount(s.currentMTUEstimate.Load()) {
-			s.currentMTUEstimate.Store(uint32(mtu))
+			s.setCurrentMTUEstimate(mtu)
 			s.sentPacketHandler.SetMaxDatagramSize(mtu)
 		}
 	}
@@ -1877,13 +1880,10 @@ func (s *connection) restoreTransportParameters(params *wire.TransportParameters
 		s.logger.Debugf("Restoring Transport Parameters: %s", params)
 	}
 
-	s.peerParams = params
+	s.setPeerTransportParameters(params)
 	s.connIDGenerator.SetMaxActiveConnIDs(params.ActiveConnectionIDLimit)
 	s.connFlowController.UpdateSendWindow(params.InitialMaxData)
 	s.streamsMap.UpdateLimits(params)
-	s.connStateMutex.Lock()
-	s.connState.SupportsDatagrams = s.supportsDatagrams()
-	s.connStateMutex.Unlock()
 }
 
 func (s *connection) handleTransportParameters(params *wire.TransportParameters) error {
@@ -1904,7 +1904,7 @@ func (s *connection) handleTransportParameters(params *wire.TransportParameters)
 		}
 	}
 
-	s.peerParams = params
+	s.setPeerTransportParameters(params)
 	// On the client side we have to wait for handshake completion.
 	// During a 0-RTT connection, we are only allowed to use the new transport parameters for 1-RTT packets.
 	if s.perspective == protocol.PerspectiveServer {
@@ -1914,10 +1914,30 @@ func (s *connection) handleTransportParameters(params *wire.TransportParameters)
 		close(s.earlyConnReadyChan)
 	}
 
-	s.connStateMutex.Lock()
-	s.connState.SupportsDatagrams = s.supportsDatagrams()
-	s.connStateMutex.Unlock()
 	return nil
+}
+
+func (s *connection) setPeerTransportParameters(params *wire.TransportParameters) {
+	s.datagramQueue.SetMaxOutgoingDatagramFrameSize(
+		maxDatagramFrameSizeForSend(
+			params.MaxDatagramFrameSize,
+			protocol.ByteCount(s.currentMTUEstimate.Load()),
+		),
+		s.version,
+	)
+	s.peerParams = params
+	s.peerMaxDatagramFrameSize.Store(int64(params.MaxDatagramFrameSize))
+}
+
+func (s *connection) setCurrentMTUEstimate(mtu protocol.ByteCount) {
+	s.datagramQueue.SetMaxOutgoingDatagramFrameSize(
+		maxDatagramFrameSizeForSend(
+			protocol.ByteCount(s.peerMaxDatagramFrameSize.Load()),
+			mtu,
+		),
+		s.version,
+	)
+	s.currentMTUEstimate.Store(uint32(mtu))
 }
 
 func (s *connection) checkTransportParameters(params *wire.TransportParameters) error {
@@ -2502,10 +2522,15 @@ func (s *connection) onStreamCompleted(id protocol.StreamID) {
 }
 
 func (s *connection) SendDatagram(p []byte) error {
-	if !s.supportsDatagrams() {
+	peerMaxDatagramFrameSize := protocol.ByteCount(s.peerMaxDatagramFrameSize.Load())
+	if peerMaxDatagramFrameSize < minLengthBearingDatagramFrameSize {
 		return errors.New("datagram support disabled")
 	}
-	maxDataLen := s.maxDatagramPayloadSize()
+	maxDataLen := maxDatagramPayloadSize(
+		peerMaxDatagramFrameSize,
+		protocol.ByteCount(s.currentMTUEstimate.Load()),
+		s.version,
+	)
 	if protocol.ByteCount(len(p)) > maxDataLen {
 		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
 	}
@@ -2513,19 +2538,6 @@ func (s *connection) SendDatagram(p []byte) error {
 	f.Data = make([]byte, len(p))
 	copy(f.Data, p)
 	return s.datagramQueue.Add(f)
-}
-
-func (s *connection) maxDatagramPayloadSize() protocol.ByteCount {
-	if !s.supportsDatagrams() {
-		return 0
-	}
-	f := &wire.DatagramFrame{DataLenPresent: true}
-	// The payload size estimate is conservative. Under many circumstances we
-	// could send a few more bytes.
-	return min(
-		f.MaxDataLen(s.peerParams.MaxDatagramFrameSize, s.version),
-		estimateMaxPayloadSize(protocol.ByteCount(s.currentMTUEstimate.Load())),
-	)
 }
 
 func (s *connection) ReceiveDatagram(ctx context.Context) ([]byte, error) {
@@ -2551,13 +2563,31 @@ func (s *connection) NextConnection(ctx context.Context) (Connection, error) {
 	return s, nil
 }
 
-// estimateMaxPayloadSize estimates the maximum payload size for short header packets.
-// It is not very sophisticated: it just subtracts the size of header (assuming the maximum
-// connection ID length), and the size of the encryption tag.
-func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
-	const overhead = 1 /* type byte */ + 20 /* maximum connection ID length */ + 16 /* tag size */
-	if mtu <= overhead {
+func maxDatagramPayloadSize(
+	peerMaxFrameSize protocol.ByteCount,
+	mtu protocol.ByteCount,
+	version protocol.Version,
+) protocol.ByteCount {
+	frameBudget := maxDatagramFrameSizeForSend(peerMaxFrameSize, mtu)
+	if frameBudget < minLengthBearingDatagramFrameSize {
 		return 0
 	}
-	return mtu - overhead
+	return (&wire.DatagramFrame{DataLenPresent: true}).MaxDataLen(frameBudget, version)
 }
+
+func maxDatagramFrameSizeForSend(peerMaxFrameSize, mtu protocol.ByteCount) protocol.ByteCount {
+	if peerMaxFrameSize < minLengthBearingDatagramFrameSize || mtu <= maxProtectedShortHeaderLen {
+		return 0
+	}
+	return min(peerMaxFrameSize, mtu-maxProtectedShortHeaderLen)
+}
+
+// SendDatagram always emits the length-bearing DATAGRAM encoding. Its smallest
+// valid frame contains the type byte and a zero-length varint.
+const minLengthBearingDatagramFrameSize protocol.ByteCount = 2
+
+// Every TLS 1.3 cipher suite supported by this implementation uses a 16-byte
+// authentication tag. Reserve the longest valid protected short header so a
+// queued DATAGRAM remains packable across connection ID rotation and packet
+// number length changes.
+const maxProtectedShortHeaderLen protocol.ByteCount = 1 + protocol.MaxConnIDLen + protocol.ByteCount(protocol.PacketNumberLen4) + 16

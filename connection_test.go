@@ -2869,7 +2869,7 @@ func testConnectionPathValidation(t *testing.T, isNATRebinding bool) {
 		connectionOptRTT(time.Second),
 	)
 	require.NoError(t, tc.conn.handleTransportParameters(&wire.TransportParameters{MaxUDPPayloadSize: 1456}))
-	tc.conn.currentMTUEstimate.Store(1450)
+	tc.conn.setCurrentMTUEstimate(1450)
 
 	newRemoteAddr := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 1234}
 	require.NotEqual(t, tc.remoteAddr, newRemoteAddr)

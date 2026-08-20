@@ -651,6 +651,12 @@ func (s *baseServer) handleInitialImpl(p receivedPacket, hdr *wire.Header) error
 			RemoteAddr:   p.remoteAddr,
 			AddrVerified: clientAddrVerified,
 		})
+		if err == nil && conf != nil {
+			conf = conf.Clone()
+		}
+		if err == nil {
+			err = validateConfig(conf)
+		}
 		if err != nil {
 			s.logger.Debugf("Rejecting new connection due to GetConfigForClient callback")
 			delete(s.zeroRTTQueues, hdr.DestConnectionID)

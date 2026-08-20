@@ -205,9 +205,8 @@ type Connection interface {
 	// If the payload is too large to be sent at the current time, a DatagramTooLargeError is returned.
 	SendDatagram(payload []byte) error
 	// ReceiveDatagram gets a message received in a datagram, as specified in RFC 9221.
-	// If Config.MaxIncomingDatagramPayloadSize is set and a peer sends a larger
-	// payload, ReceiveDatagram returns a DatagramTooLargeError without allocating
-	// a receive buffer for that payload.
+	// A datagram whose payload exceeds Config.MaxIncomingDatagramPayloadSize is discarded
+	// and is never returned by this method.
 	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
@@ -343,10 +342,9 @@ type Config struct {
 	// Enable QUIC datagram support (RFC 9221).
 	EnableDatagrams bool
 	// MaxIncomingDatagramPayloadSize limits the DATAGRAM payload copied into the
-	// application receive queue. A zero value uses the implementation default.
-	// A payload above a positive limit is discarded before the receive-buffer copy
-	// and reported by ReceiveDatagram as a DatagramTooLargeError. Negative values
-	// are invalid.
+	// application receive queue. A zero value disables this additional local limit.
+	// A payload above a positive limit is discarded before the receive-buffer copy.
+	// Negative values are invalid.
 	MaxIncomingDatagramPayloadSize int64
 	Tracer                         func(context.Context, logging.Perspective, ConnectionID) *logging.ConnectionTracer
 }
@@ -366,7 +364,9 @@ type ClientHelloInfo struct {
 type ConnectionState struct {
 	// TLS contains information about the TLS connection state, incl. the tls.ConnectionState.
 	TLS tls.ConnectionState
-	// SupportsDatagrams indicates whether the peer advertised support for QUIC datagrams (RFC 9221).
+	// SupportsDatagrams indicates whether the peer advertised a usable QUIC DATAGRAM limit (RFC 9221).
+	// It is false if max_datagram_frame_size is too small to carry the length-bearing
+	// DATAGRAM encoding used by SendDatagram.
 	// When true, datagrams can be sent using the Connection's SendDatagram method.
 	// This is a unilateral declaration by the peer - receiving datagrams is only possible if
 	// datagram support was enabled locally via Config.EnableDatagrams.

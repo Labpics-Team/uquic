@@ -62,9 +62,7 @@ func (e *StreamError) Error() string {
 	return fmt.Sprintf("stream %d canceled by %s with error code %d", e.StreamID, pers, e.ErrorCode)
 }
 
-// DatagramTooLargeError is returned from Connection.SendDatagram if the payload
-// is too large to be sent, or from Connection.ReceiveDatagram if it exceeds the
-// configured MaxIncomingDatagramPayloadSize.
+// DatagramTooLargeError is returned from Connection.SendDatagram if the payload is too large to be sent.
 type DatagramTooLargeError struct {
 	MaxDatagramPayloadSize int64
 }

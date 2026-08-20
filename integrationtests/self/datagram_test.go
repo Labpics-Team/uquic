@@ -3,7 +3,6 @@ package self_test
 import (
 	"bytes"
 	"context"
-	mrand "math/rand/v2"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -150,14 +149,8 @@ func TestIncomingDatagramPayloadLimit(t *testing.T) {
 	defer serverConn.CloseWithError(0, "")
 
 	require.NoError(t, clientConn.SendDatagram([]byte("four")))
-	data, err := serverConn.ReceiveDatagram(ctx)
-	require.Nil(t, data)
-	var sizeErr *quic.DatagramTooLargeError
-	require.ErrorAs(t, err, &sizeErr)
-	require.EqualValues(t, 3, sizeErr.MaxDatagramPayloadSize)
-
 	require.NoError(t, clientConn.SendDatagram([]byte("ok")))
-	data, err = serverConn.ReceiveDatagram(ctx)
+	data, err := serverConn.ReceiveDatagram(ctx)
 	require.NoError(t, err)
 	require.Equal(t, []byte("ok"), data)
 }
@@ -170,12 +163,17 @@ func TestDatagramLoss(t *testing.T) {
 	server, err := quic.Listen(
 		newUPDConnLocalhost(t),
 		getTLSConfig(),
-		getQuicConfig(&quic.Config{EnableDatagrams: true}),
+		getQuicConfig(&quic.Config{DisablePathMTUDiscovery: true, EnableDatagrams: true}),
 	)
 	require.NoError(t, err)
 	defer server.Close()
 
-	var droppedIncoming, droppedOutgoing, total atomic.Int32
+	var eligibleIncoming, eligibleOutgoing, droppedIncoming, droppedOutgoing, total atomic.Int32
+	shouldDrop := func(packetNumber, phase int32) bool {
+		// 37 is coprime to 100, so each block of 100 eligible packets visits
+		// every residue exactly once. Different phases avoid correlated loss.
+		return (packetNumber*37+phase)%100 < 20
+	}
 	proxy := &quicproxy.Proxy{
 		Conn:       newUPDConnLocalhost(t),
 		ServerAddr: server.Addr().(*net.UDPAddr),
@@ -187,14 +185,17 @@ func TestDatagramLoss(t *testing.T) {
 				return false
 			}
 			total.Add(1)
-			if mrand.Int()%10 == 0 {
-				switch dir {
-				case quicproxy.DirectionIncoming:
+			switch dir {
+			case quicproxy.DirectionIncoming:
+				if shouldDrop(eligibleIncoming.Add(1), 0) {
 					droppedIncoming.Add(1)
-				case quicproxy.DirectionOutgoing:
-					droppedOutgoing.Add(1)
+					return true
 				}
-				return true
+			case quicproxy.DirectionOutgoing:
+				if shouldDrop(eligibleOutgoing.Add(1), 53) {
+					droppedOutgoing.Add(1)
+					return true
+				}
 			}
 			return false
 		},
@@ -203,14 +204,16 @@ func TestDatagramLoss(t *testing.T) {
 	require.NoError(t, proxy.Start())
 	defer proxy.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(numDatagrams*time.Millisecond))
+	// SendDatagram blocks when its bounded queue is full. Leave enough time for
+	// the handshake, ACKs, and both 100-DATAGRAM send loops to make progress.
+	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(4*numDatagrams*time.Millisecond))
 	defer cancel()
 	clientConn, err := quic.Dial(
 		ctx,
 		newUPDConnLocalhost(t),
 		proxy.LocalAddr(),
 		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{EnableDatagrams: true}),
+		getQuicConfig(&quic.Config{DisablePathMTUDiscovery: true, EnableDatagrams: true}),
 	)
 	require.NoError(t, err)
 	defer clientConn.CloseWithError(0, "")
@@ -267,10 +270,11 @@ func TestDatagramLoss(t *testing.T) {
 	numDroppedIncoming := droppedIncoming.Load()
 	numDroppedOutgoing := droppedOutgoing.Load()
 	t.Logf("dropped %d incoming and %d outgoing out of %d packets", numDroppedIncoming, numDroppedOutgoing, total.Load())
-	assert.NotZero(t, numDroppedIncoming)
-	assert.NotZero(t, numDroppedOutgoing)
+	assert.EqualValues(t, 2*numDatagrams, total.Load())
+	assert.EqualValues(t, numDatagrams/5, numDroppedIncoming)
+	assert.EqualValues(t, numDatagrams/5, numDroppedOutgoing)
 	t.Logf("server received %d out of %d sent datagrams", serverDatagrams, numDatagrams)
-	assert.InDelta(t, numDatagrams-numDroppedIncoming, serverDatagrams, numDatagrams/20, "datagrams received by the server")
+	assert.EqualValues(t, numDatagrams-numDroppedIncoming, serverDatagrams, "datagrams received by the server")
 	t.Logf("client received %d out of %d sent datagrams", clientDatagrams, numDatagrams)
-	assert.InDelta(t, numDatagrams-numDroppedOutgoing, clientDatagrams, numDatagrams/20, "datagrams received by the client")
+	assert.EqualValues(t, numDatagrams-numDroppedOutgoing, clientDatagrams, "datagrams received by the client")
 }

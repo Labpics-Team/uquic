@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/internal/wire"
 
@@ -15,6 +16,7 @@ import (
 func TestDatagramQueuePeekAndPop(t *testing.T) {
 	var queued []struct{}
 	queue := newDatagramQueue(func() { queued = append(queued, struct{}{}) }, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
 	require.Nil(t, queue.Peek())
 	require.Empty(t, queued)
 	require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte("foo")}))
@@ -28,6 +30,7 @@ func TestDatagramQueuePeekAndPop(t *testing.T) {
 
 func TestDatagramQueueSendQueueLength(t *testing.T) {
 	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
 
 	for i := 0; i < maxDatagramSendQueueLen; i++ {
 		require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte{0}}))
@@ -66,6 +69,125 @@ func TestDatagramQueueSendQueueLength(t *testing.T) {
 	require.Equal(t, &wire.DatagramFrame{Data: []byte("foobar")}, f)
 }
 
+func TestDatagramQueueRejectsFrameAfterOutgoingLimitIsRevoked(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
+	queue.SetMaxOutgoingDatagramFrameSize(1, protocol.Version1)
+
+	err := queue.Add(&wire.DatagramFrame{DataLenPresent: true})
+	require.EqualError(t, err, "datagram support disabled")
+	require.Nil(t, queue.Peek())
+}
+
+func TestDatagramQueuePurgesOnlyFramesInvalidatedByReducedOutgoingLimit(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
+	require.NoError(t, queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("a")}))
+	require.NoError(t, queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("four")}))
+	require.NoError(t, queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("b")}))
+
+	queue.SetMaxOutgoingDatagramFrameSize(3, protocol.Version1)
+	require.Equal(t, []byte("a"), queue.Peek().Data)
+	queue.Pop()
+	require.Equal(t, []byte("b"), queue.Peek().Data)
+	queue.Pop()
+	require.Nil(t, queue.Peek())
+}
+
+func TestDatagramQueueWakesBlockedSendWhenOutgoingLimitIsRevoked(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
+	for i := 0; i < maxDatagramSendQueueLen; i++ {
+		require.NoError(t, queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte{0}}))
+	}
+
+	const blockedSends = 3
+	started := make(chan struct{}, blockedSends)
+	errChan := make(chan error, blockedSends)
+	for i := 0; i < blockedSends; i++ {
+		go func() {
+			started <- struct{}{}
+			errChan <- queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("stale")})
+		}()
+	}
+	for i := 0; i < blockedSends; i++ {
+		<-started
+	}
+	select {
+	case err := <-errChan:
+		t.Fatalf("send returned before queue policy changed: %v", err)
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
+
+	queue.SetMaxOutgoingDatagramFrameSize(1, protocol.Version1)
+	for i := 0; i < blockedSends; i++ {
+		select {
+		case err := <-errChan:
+			require.EqualError(t, err, "datagram support disabled")
+		case <-time.After(time.Second):
+			t.Fatal("blocked send was not woken by outgoing policy change")
+		}
+	}
+	require.Nil(t, queue.Peek())
+}
+
+func TestDatagramQueueRevalidatesBlockedSendAfterOutgoingLimitReduction(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
+	for i := 0; i < maxDatagramSendQueueLen; i++ {
+		require.NoError(t, queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte{0}}))
+	}
+
+	errChan := make(chan error, 1)
+	go func() { errChan <- queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("stale")}) }()
+	select {
+	case err := <-errChan:
+		t.Fatalf("send returned before queue policy changed: %v", err)
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
+
+	queue.SetMaxOutgoingDatagramFrameSize(3, protocol.Version1)
+	select {
+	case err := <-errChan:
+		var sizeErr *DatagramTooLargeError
+		require.ErrorAs(t, err, &sizeErr)
+		require.Equal(t, int64(1), sizeErr.MaxDatagramPayloadSize)
+	case <-time.After(time.Second):
+		t.Fatal("blocked send was not revalidated after outgoing policy change")
+	}
+}
+
+func TestDatagramQueueKeepsBlockedSendAfterOutgoingLimitIncrease(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(10, protocol.Version1)
+	for i := 0; i < maxDatagramSendQueueLen; i++ {
+		require.NoError(t, queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte{0}}))
+	}
+
+	started := make(chan struct{})
+	errChan := make(chan error, 1)
+	go func() {
+		close(started)
+		errChan <- queue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("fresh")})
+	}()
+	<-started
+
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
+	select {
+	case err := <-errChan:
+		t.Fatalf("send returned while the full queue still had no space: %v", err)
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
+
+	queue.Pop()
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("blocked send did not resume after queue space became available")
+	}
+}
+
 func TestDatagramQueueReceive(t *testing.T) {
 	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
 
@@ -80,16 +202,21 @@ func TestDatagramQueueReceive(t *testing.T) {
 	require.Equal(t, []byte("bar"), data)
 }
 
-func TestDatagramQueueReportsOversizedReceiveWithoutBufferingPayload(t *testing.T) {
+func TestDatagramQueueDropsOversizedReceiveWithoutBufferingPayload(t *testing.T) {
 	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 3)
 	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("four")})
 
-	data, err := queue.Receive(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	data, err := queue.Receive(ctx)
 	require.Nil(t, data)
-	var sizeErr *DatagramTooLargeError
-	require.ErrorAs(t, err, &sizeErr)
-	require.Equal(t, int64(3), sizeErr.MaxDatagramPayloadSize)
+	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, queue.rcvQueue)
+
+	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("ok")})
+	data, err = queue.Receive(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []byte("ok"), data)
 }
 
 func TestDatagramQueueReceiveBlocking(t *testing.T) {
@@ -143,6 +270,7 @@ func TestDatagramQueueReceiveBlocking(t *testing.T) {
 
 func TestDatagramQueueClose(t *testing.T) {
 	queue := newDatagramQueue(func() {}, utils.DefaultLogger, 0)
+	queue.SetMaxOutgoingDatagramFrameSize(wire.MaxDatagramSize, protocol.Version1)
 
 	for i := 0; i < maxDatagramSendQueueLen; i++ {
 		require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte{0}}))
