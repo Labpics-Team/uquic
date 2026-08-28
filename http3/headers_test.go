@@ -2,8 +2,10 @@ package http3
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -18,7 +20,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: "content-length", Value: "42"},
 		}
-		req, err := requestFromHeaders(headers)
+		req, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(req.Method).To(Equal("GET"))
 		Expect(req.URL.Path).To(Equal("/foo"))
@@ -40,7 +42,7 @@ var _ = Describe("Request", func() {
 			{Name: ":authority", Value: "quic.clemente.io"},
 			{Name: ":method", Value: "GET"},
 		}
-		req, err := requestFromHeaders(headers)
+		req, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(req.ContentLength).To(BeEquivalentTo(-1))
 	})
@@ -52,7 +54,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: "Content-Length", Value: "42"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError("header field is not lower-case: Content-Length"))
 	})
 
@@ -63,7 +65,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: ":foo", Value: "bar"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError("unknown pseudo header: :foo"))
 	})
 
@@ -74,7 +76,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: "@", Value: "42"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError(`invalid header field name: "@"`))
 	})
 
@@ -85,7 +87,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: "content", Value: "\n"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError(`invalid header field value for content: "\n"`))
 	})
 
@@ -96,7 +98,7 @@ var _ = Describe("Request", func() {
 			{Name: ":authority", Value: "quic.clemente.io"},
 			{Name: ":method", Value: "GET"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError("received pseudo header :authority after a regular header field"))
 	})
 
@@ -107,7 +109,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: "content-length", Value: "-42"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("invalid content length"))
 	})
@@ -120,7 +122,7 @@ var _ = Describe("Request", func() {
 			{Name: "content-length", Value: "42"},
 			{Name: "content-length", Value: "1337"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError("contradicting content lengths (42 and 1337)"))
 	})
 
@@ -132,7 +134,7 @@ var _ = Describe("Request", func() {
 			{Name: "content-length", Value: "42"},
 			{Name: "content-length", Value: "42"},
 		}
-		req, err := requestFromHeaders(headers)
+		req, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(req.ContentLength).To(Equal(int64(42)))
 		Expect(req.Header.Get("Content-Length")).To(Equal("42"))
@@ -145,7 +147,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: ":status", Value: "404"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError("invalid request pseudo header: :status"))
 	})
 
@@ -155,7 +157,7 @@ var _ = Describe("Request", func() {
 			{Name: ":authority", Value: "quic.clemente.io"},
 			{Name: ":method", Value: "GET"},
 		}
-		req, err := requestFromHeaders(headers)
+		req, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(req.Header).To(BeEmpty())
 		Expect(req.Body).To(BeNil())
@@ -173,7 +175,7 @@ var _ = Describe("Request", func() {
 			{Name: "cookie", Value: "cookie1=foobar1"},
 			{Name: "cookie", Value: "cookie2=foobar2"},
 		}
-		req, err := requestFromHeaders(headers)
+		req, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(req.Header).To(Equal(http.Header{
 			"Cookie": []string{"cookie1=foobar1; cookie2=foobar2"},
@@ -189,7 +191,7 @@ var _ = Describe("Request", func() {
 			{Name: "duplicate-header", Value: "1"},
 			{Name: "duplicate-header", Value: "2"},
 		}
-		req, err := requestFromHeaders(headers)
+		req, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(req.Header).To(Equal(http.Header{
 			"Cache-Control":    []string{"max-age=0"},
@@ -202,7 +204,7 @@ var _ = Describe("Request", func() {
 			{Name: ":authority", Value: "quic.clemente.io"},
 			{Name: ":method", Value: "GET"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError(":path, :authority and :method must not be empty"))
 	})
 
@@ -211,7 +213,7 @@ var _ = Describe("Request", func() {
 			{Name: ":path", Value: "/foo"},
 			{Name: ":authority", Value: "quic.clemente.io"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError(":path, :authority and :method must not be empty"))
 	})
 
@@ -220,7 +222,7 @@ var _ = Describe("Request", func() {
 			{Name: ":path", Value: "/foo"},
 			{Name: ":method", Value: "GET"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError(":path, :authority and :method must not be empty"))
 	})
 
@@ -231,7 +233,7 @@ var _ = Describe("Request", func() {
 			{Name: ":method", Value: "GET"},
 			{Name: ":protocol", Value: "connect-udp"},
 		}
-		_, err := requestFromHeaders(headers)
+		_, err := requestFromHeaders(headers, math.MaxInt)
 		Expect(err).To(MatchError(":protocol must be empty"))
 	})
 
@@ -241,7 +243,7 @@ var _ = Describe("Request", func() {
 				{Name: ":authority", Value: "quic.clemente.io"},
 				{Name: ":method", Value: http.MethodConnect},
 			}
-			req, err := requestFromHeaders(headers)
+			req, err := requestFromHeaders(headers, math.MaxInt)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(req.Method).To(Equal(http.MethodConnect))
 			Expect(req.Proto).To(Equal("HTTP/3.0"))
@@ -252,7 +254,7 @@ var _ = Describe("Request", func() {
 			headers := []qpack.HeaderField{
 				{Name: ":method", Value: http.MethodConnect},
 			}
-			_, err := requestFromHeaders(headers)
+			_, err := requestFromHeaders(headers, math.MaxInt)
 			Expect(err).To(MatchError(":path must be empty and :authority must not be empty"))
 		})
 
@@ -262,7 +264,7 @@ var _ = Describe("Request", func() {
 				{Name: ":authority", Value: "quic.clemente.io"},
 				{Name: ":method", Value: http.MethodConnect},
 			}
-			_, err := requestFromHeaders(headers)
+			_, err := requestFromHeaders(headers, math.MaxInt)
 			Expect(err).To(MatchError(":path must be empty and :authority must not be empty"))
 		})
 	})
@@ -276,7 +278,7 @@ var _ = Describe("Request", func() {
 				{Name: ":authority", Value: "quic.clemente.io"},
 				{Name: ":path", Value: "/foo?val=1337"},
 			}
-			req, err := requestFromHeaders(headers)
+			req, err := requestFromHeaders(headers, math.MaxInt)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(req.Method).To(Equal(http.MethodConnect))
 			Expect(req.Proto).To(Equal("webtransport"))
@@ -291,7 +293,7 @@ var _ = Describe("Request", func() {
 				{Name: ":authority", Value: "quic.clemente.io"},
 				{Name: ":path", Value: "/foo"},
 			}
-			_, err := requestFromHeaders(headers)
+			_, err := requestFromHeaders(headers, math.MaxInt)
 			Expect(err).To(MatchError("extended CONNECT: :scheme, :path and :authority must not be empty"))
 		})
 	})
@@ -322,7 +324,7 @@ var _ = Describe("Response", func() {
 			{Name: "content-length", Value: "42"},
 		}
 		rsp := &http.Response{}
-		err := updateResponseFromHeaders(rsp, headers)
+		err := updateResponseFromHeaders(rsp, headers, math.MaxInt)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rsp.Proto).To(Equal("HTTP/3.0"))
 		Expect(rsp.ProtoMajor).To(Equal(3))
@@ -342,7 +344,7 @@ var _ = Describe("Response", func() {
 			{Name: "trailer", Value: "TRAILER3"},
 		}
 		rsp := &http.Response{}
-		err := updateResponseFromHeaders(rsp, headers)
+		err := updateResponseFromHeaders(rsp, headers, math.MaxInt)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rsp.Header).To(HaveLen(0))
 		Expect(rsp.Trailer).To(Equal(http.Header(map[string][]string{
@@ -357,7 +359,7 @@ var _ = Describe("Response", func() {
 			{Name: "content-length", Value: "42"},
 			{Name: ":status", Value: "200"},
 		}
-		err := updateResponseFromHeaders(&http.Response{}, headers)
+		err := updateResponseFromHeaders(&http.Response{}, headers, math.MaxInt)
 		Expect(err).To(MatchError("received pseudo header :status after a regular header field"))
 	})
 
@@ -365,7 +367,7 @@ var _ = Describe("Response", func() {
 		headers := []qpack.HeaderField{
 			{Name: "content-length", Value: "42"},
 		}
-		err := updateResponseFromHeaders(&http.Response{}, headers)
+		err := updateResponseFromHeaders(&http.Response{}, headers, math.MaxInt)
 		Expect(err).To(MatchError("missing status field"))
 	})
 
@@ -373,7 +375,7 @@ var _ = Describe("Response", func() {
 		headers := []qpack.HeaderField{
 			{Name: ":status", Value: "foobar"},
 		}
-		err := updateResponseFromHeaders(&http.Response{}, headers)
+		err := updateResponseFromHeaders(&http.Response{}, headers, math.MaxInt)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("invalid status code"))
 	})
@@ -383,7 +385,7 @@ var _ = Describe("Response", func() {
 			{Name: ":status", Value: "404"},
 			{Name: ":method", Value: "GET"},
 		}
-		err := updateResponseFromHeaders(&http.Response{}, headers)
+		err := updateResponseFromHeaders(&http.Response{}, headers, math.MaxInt)
 		Expect(err).To(MatchError("invalid response pseudo header: :method"))
 	})
 
@@ -393,7 +395,7 @@ var _ = Describe("Response", func() {
 				{Name: ":status", Value: "404"},
 				{Name: invalidField, Value: "some-value"},
 			}
-			err := updateResponseFromHeaders(&http.Response{}, headers)
+			err := updateResponseFromHeaders(&http.Response{}, headers, math.MaxInt)
 			Expect(err).To(MatchError(fmt.Sprintf("invalid header field name: %q", invalidField)))
 		},
 		Entry("connection", "connection"),
@@ -408,19 +410,19 @@ var _ = Describe("Response", func() {
 			{Name: ":status", Value: "404"},
 			{Name: "te", Value: "trailers"},
 		}
-		Expect(updateResponseFromHeaders(&http.Response{}, headers)).To(Succeed())
+		Expect(updateResponseFromHeaders(&http.Response{}, headers, math.MaxInt)).To(Succeed())
 		headers = []qpack.HeaderField{
 			{Name: ":status", Value: "404"},
 			{Name: "te", Value: "not-trailers"},
 		}
-		Expect(updateResponseFromHeaders(&http.Response{}, headers)).To(MatchError("invalid TE header field value: \"not-trailers\""))
+		Expect(updateResponseFromHeaders(&http.Response{}, headers, math.MaxInt)).To(MatchError("invalid TE header field value: \"not-trailers\""))
 	})
 
 	It("parses trailers", func() {
 		headers := []qpack.HeaderField{
 			{Name: "content-length", Value: "42"},
 		}
-		hdr, err := parseTrailers(headers)
+		hdr, err := parseTrailers(headers, math.MaxInt)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(hdr.Get("Content-Length")).To(Equal("42"))
 	})
@@ -429,7 +431,49 @@ var _ = Describe("Response", func() {
 		headers := []qpack.HeaderField{
 			{Name: ":status", Value: "200"},
 		}
-		_, err := parseTrailers(headers)
+		_, err := parseTrailers(headers, math.MaxInt)
 		Expect(err).To(MatchError("http3: received pseudo header in trailer: :status"))
+	})
+
+	// CVE-2025-64702: the decompressed (post-QPACK) header field list must be
+	// bounded. The encoded HEADERS frame length check alone does not bound it.
+	It("rejects request headers whose decoded size exceeds the limit", func() {
+		headers := []qpack.HeaderField{
+			{Name: ":path", Value: "/foo"},
+			{Name: ":authority", Value: "quic.clemente.io"},
+			{Name: ":method", Value: "GET"},
+			{Name: "x-big", Value: strings.Repeat("a", 4096)},
+		}
+		// the four fields cost well over 64 bytes; a 64-byte budget rejects them
+		_, err := requestFromHeaders(headers, 64)
+		Expect(err).To(MatchError(errHeaderTooLarge))
+	})
+
+	It("rejects response headers whose decoded size exceeds the limit", func() {
+		headers := []qpack.HeaderField{
+			{Name: ":status", Value: "200"},
+			{Name: "x-big", Value: strings.Repeat("a", 4096)},
+		}
+		err := updateResponseFromHeaders(&http.Response{}, headers, 64)
+		Expect(err).To(MatchError(errHeaderTooLarge))
+	})
+
+	// CVE-2026-40898: the distinct trailer CVE. Upstream's header fix missed the
+	// trailer decode path, leaving it unbounded.
+	It("rejects trailers whose decoded size exceeds the limit", func() {
+		headers := []qpack.HeaderField{
+			{Name: "x-big", Value: strings.Repeat("a", 4096)},
+		}
+		_, err := parseTrailers(headers, 64)
+		Expect(err).To(MatchError(errHeaderTooLarge))
+	})
+
+	It("accepts headers exactly at the size limit", func() {
+		headers := []qpack.HeaderField{
+			{Name: ":status", Value: "200"},
+		}
+		// budget = len(":status")+len("200")+32 = 7+3+32 = 42 — exactly the decoded size
+		err := updateResponseFromHeaders(&http.Response{}, headers, 42)
+		Expect(err).ToNot(HaveOccurred())
 	})
 })

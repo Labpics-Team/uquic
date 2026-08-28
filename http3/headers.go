@@ -3,6 +3,7 @@ package http3
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -13,6 +14,21 @@ import (
 
 	"github.com/quic-go/qpack"
 )
+
+// errHeaderTooLarge is returned when the uncompressed size of the decoded
+// QPACK header (or trailer) field list exceeds the configured limit.
+// See RFC 9114, section 4.2.2.
+var errHeaderTooLarge = errors.New("http3: header fields too large")
+
+// headerSizeLimit converts the configured maxHeaderBytes (a uint64) into the
+// int budget consumed per field in parseHeaders/parseTrailers, clamping at
+// math.MaxInt so the conversion never wraps to a negative value.
+func headerSizeLimit(maxHeaderBytes uint64) int {
+	if maxHeaderBytes > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(maxHeaderBytes)
+}
 
 type header struct {
 	// Pseudo header fields defined in RFC 9114
@@ -38,11 +54,20 @@ var invalidHeaderFields = [...]string{
 	"upgrade",
 }
 
-func parseHeaders(headers []qpack.HeaderField, isRequest bool) (header, error) {
+func parseHeaders(headers []qpack.HeaderField, isRequest bool, limit int) (header, error) {
 	hdr := header{Headers: make(http.Header, len(headers))}
 	var readFirstRegularHeader, readContentLength bool
 	var contentLengthStr string
 	for _, h := range headers {
+		// RFC 9114, section 4.2.2:
+		// The size of a field list is calculated based on the uncompressed size of
+		// fields, including the length of the name and value in bytes plus an overhead
+		// of 32 bytes for each field. This bounds the decompressed (post-QPACK) size,
+		// which the encoded HEADERS frame length alone does not (CVE-2025-64702).
+		limit -= len(h.Name) + len(h.Value) + 32
+		if limit < 0 {
+			return header{}, errHeaderTooLarge
+		}
 		// field names need to be lowercase, see section 4.2 of RFC 9114
 		if strings.ToLower(h.Name) != h.Name {
 			return header{}, fmt.Errorf("header field is not lower-case: %s", h.Name)
@@ -120,9 +145,16 @@ func parseHeaders(headers []qpack.HeaderField, isRequest bool) (header, error) {
 	return hdr, nil
 }
 
-func parseTrailers(headers []qpack.HeaderField) (http.Header, error) {
+func parseTrailers(headers []qpack.HeaderField, limit int) (http.Header, error) {
 	h := make(http.Header, len(headers))
 	for _, field := range headers {
+		// RFC 9114, section 4.2.2: enforce the same uncompressed field-list size
+		// limit on trailers as on headers. Upstream's header fix missed trailers
+		// (CVE-2026-40898), leaving the trailer decode path unbounded.
+		limit -= len(field.Name) + len(field.Value) + 32
+		if limit < 0 {
+			return nil, errHeaderTooLarge
+		}
 		if field.IsPseudo() {
 			return nil, fmt.Errorf("http3: received pseudo header in trailer: %s", field.Name)
 		}
@@ -131,8 +163,8 @@ func parseTrailers(headers []qpack.HeaderField) (http.Header, error) {
 	return h, nil
 }
 
-func requestFromHeaders(headerFields []qpack.HeaderField) (*http.Request, error) {
-	hdr, err := parseHeaders(headerFields, true)
+func requestFromHeaders(headerFields []qpack.HeaderField, limit int) (*http.Request, error) {
+	hdr, err := parseHeaders(headerFields, true, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -212,8 +244,8 @@ func hostnameFromURL(url *url.URL) string {
 // using the decoded qpack header filed.
 // It is only called for the HTTP header (and not the HTTP trailer).
 // It takes an http.Response as an argument to allow the caller to set the trailer later on.
-func updateResponseFromHeaders(rsp *http.Response, headerFields []qpack.HeaderField) error {
-	hdr, err := parseHeaders(headerFields, false)
+func updateResponseFromHeaders(rsp *http.Response, headerFields []qpack.HeaderField, limit int) error {
+	hdr, err := parseHeaders(headerFields, false, limit)
 	if err != nil {
 		return err
 	}
