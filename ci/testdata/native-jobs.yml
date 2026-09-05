@@ -1,0 +1,121 @@
+ginkgo_test.yml:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go version
+      - env:
+          TIMESCALE_FACTOR: 10
+        name: Run unit tests
+        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -cover -randomize-all -randomize-suites -trace -skip-package integrationtests
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - 1.23.x
+          - 1.24.x
+go_build.yml:
+  build:
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go version
+      - name: Build
+        run: go build -v ./...
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - 1.21.x
+          - 1.22.x
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+integration.yml:
+  integration:
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBUG: false
+      TIMESCALE_FACTOR: 3
+    name: Integration (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})
+    runs-on: ${{ format('{0}-latest', matrix.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - if: env.DEBUG == 'true'
+        name: Set qlogger
+        run: echo "QLOGFLAG= -qlog" >> $GITHUB_ENV
+      - if: ${{ matrix.race }}
+        name: Enable race detector
+        run: echo "RACEFLAG= -race" >> $GITHUB_ENV
+      - if: ${{ matrix.use32bit }}
+        name: Enable 32-bit build
+        run: echo "GOARCH=386" >> $GITHUB_ENV
+      - run: go version
+      - name: Run tools tests
+        run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/tools/...
+      - name: Run version negotiation tests
+        run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/versionnegotiation ${{ env.QLOGFLAG }}
+      - if: success() || failure()
+        name: Run self tests, using QUIC v1
+        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=1 ${{ env.QLOGFLAG }}
+      - if: ${{ !matrix.race && (success() || failure()) }}
+        name: Run self tests, using QUIC v2
+        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=2 ${{ env.QLOGFLAG }}
+      - env:
+          QUIC_GO_DISABLE_GSO: true
+        if: ${{ matrix.os == 'ubuntu' && (success() || failure()) }}
+        name: Run self tests, with GSO disabled
+        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=1 ${{ env.QLOGFLAG }}
+      - env:
+          QUIC_GO_DISABLE_ECN: true
+        if: ${{ !matrix.race && matrix.os == 'ubuntu' && (success() || failure()) }}
+        name: Run self tests, with ECN disabled
+        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=1 ${{ env.QLOGFLAG }}
+      - if: ${{ !matrix.race }}
+        name: Run benchmarks
+        run: go test -v -run=^$ -timeout 5m -shuffle=on -bench=. ./integrationtests/self
+      - if: ${{ always() && env.DEBUG == 'true' }}
+        name: save qlogs
+        uses: actions/upload-artifact@v4
+        with:
+          name: qlogs-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}
+          path: integrationtests/self/*.qlog
+          retention-days: 7
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - 1.23.x
+          - 1.24.x
+        include:
+          - go: 1.24.x
+            os: ubuntu
+            race: true
+          - go: 1.24.x
+            os: ubuntu
+            use32bit: true
+          - go: 1.24.x
+            os: windows
+            race: false
+          - go: 1.24.x
+            os: macos
+            race: false
+        os:
+          - ubuntu
+        race:
+          - false
+        use32bit:
+          - false
+    timeout-minutes: 30

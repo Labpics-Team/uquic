@@ -1,8 +1,7 @@
 package ci
 
 import (
-	"crypto/sha256"
-	"encoding/json"
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -20,8 +19,10 @@ const contractJob = `
 runs-on: ubuntu-latest
 timeout-minutes: 5
 steps:
-  - uses: actions/checkout@v4
-  - uses: actions/setup-go@v5
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    with:
+      persist-credentials: false
+  - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
     with:
       go-version: '1.24.x'
   - run: go test -count=1 ./ci
@@ -83,17 +84,19 @@ func parse(raw []byte) (map[string]any, error) {
 	return value, nil
 }
 
-func digest(value any) string {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return "invalid JSON: " + err.Error()
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(raw))
-}
+//go:embed testdata/native-jobs.yml
+var nativeJobsYAML []byte
 
 func validate(files map[string][]byte) error {
 	if len(files) != 3 {
 		return fmt.Errorf("expected exactly the three native workflows")
+	}
+	nativeJobs, err := parse(nativeJobsYAML)
+	if err != nil {
+		return fmt.Errorf("invalid native job fixture: %w", err)
+	}
+	if len(nativeJobs) != 3 {
+		return fmt.Errorf("expected exactly three native job fixtures")
 	}
 	for _, file := range []string{"go_build.yml", "ginkgo_test.yml", "integration.yml"} {
 		workflow, err := parse(files[file])
@@ -106,7 +109,17 @@ func validate(files map[string][]byte) error {
 		}
 		delete(workflow, "jobs")
 		metadata := map[string]any{"permissions": map[string]any{"contents": "read"}}
-		var expectedJobs map[string]string
+		expectedJobs, ok := nativeJobs[file].(map[string]any)
+		if !ok || len(expectedJobs) != 1 {
+			return fmt.Errorf("%s: expected exactly one native job fixture", file)
+		}
+		nativeName := "build"
+		if file == "integration.yml" {
+			nativeName = "integration"
+		}
+		if _, ok := expectedJobs[nativeName].(map[string]any); !ok {
+			return fmt.Errorf("%s: missing native %s fixture", file, nativeName)
+		}
 		switch file {
 		case "go_build.yml":
 			metadata["name"] = "Go Build"
@@ -115,22 +128,24 @@ func validate(files map[string][]byte) error {
 				"group":              "${{ github.workflow }}-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}",
 				"cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
 			}
-			contract, _ := parse([]byte(contractJob))
-			gate, _ := parse([]byte(gateJob))
-			expectedJobs = map[string]string{
-				"build":    "5e39b65af25d6a68e21ffaa22e624c066b909f9f34e860a58148e204ee55681d",
-				"contract": digest(contract), "gate": digest(gate),
-				"ginkgo":      digest(map[string]any{"uses": "./.github/workflows/ginkgo_test.yml"}),
-				"integration": digest(map[string]any{"uses": "./.github/workflows/integration.yml"}),
+			contract, err := parse([]byte(contractJob))
+			if err != nil {
+				return fmt.Errorf("invalid contract job fixture: %w", err)
 			}
+			gate, err := parse([]byte(gateJob))
+			if err != nil {
+				return fmt.Errorf("invalid gate job fixture: %w", err)
+			}
+			expectedJobs["contract"] = contract
+			expectedJobs["gate"] = gate
+			expectedJobs["ginkgo"] = map[string]any{"uses": "./.github/workflows/ginkgo_test.yml"}
+			expectedJobs["integration"] = map[string]any{"uses": "./.github/workflows/integration.yml"}
 		case "ginkgo_test.yml":
 			metadata["name"] = "Ginkgo Unit Tests"
 			metadata["on"] = map[string]any{"workflow_call": nil}
-			expectedJobs = map[string]string{"build": "bb0bfdaa8d693fd2c094cc3ae3d4e8dedae85f24fe867839a7dfef28f3a7f7f1"}
 		case "integration.yml":
 			metadata["name"] = "Integration"
 			metadata["on"] = map[string]any{"workflow_call": nil}
-			expectedJobs = map[string]string{"integration": "6e4771cbd40e5b14ad872211685704ab9509b3473ad6b47da7f088205978a1d4"}
 		}
 		if !reflect.DeepEqual(workflow, metadata) {
 			return fmt.Errorf("%s: triggers, permissions or concurrency changed", file)
@@ -138,10 +153,10 @@ func validate(files map[string][]byte) error {
 		if len(jobs) != len(expectedJobs) {
 			return fmt.Errorf("%s: native job inventory changed", file)
 		}
-		// Отпечатки исходных заданий сохраняют матрицы, команды, inputs и порядок шагов; форматирование YAML не влияет.
+		// Полный YAML-эталон сохраняет матрицы, команды, inputs и порядок шагов независимо от форматирования.
 		for name, want := range expectedJobs {
-			if got := digest(jobs[name]); got != want {
-				return fmt.Errorf("%s/%s: complete job contract changed (got %s)", file, name, got)
+			if !reflect.DeepEqual(jobs[name], want) {
+				return fmt.Errorf("%s/%s: complete job contract changed", file, name)
 			}
 		}
 	}
@@ -191,6 +206,46 @@ func TestContractIgnoresYAMLFormatting(t *testing.T) {
 	}
 }
 
+func gateBash() (string, error) {
+	if runtime.GOOS != "windows" {
+		return exec.LookPath("bash")
+	}
+	// Windows bash из PATH может быть WSL и не передавать переменные проверки в дочерний процесс.
+	var candidates []string
+	if git, err := exec.LookPath("git"); err == nil {
+		if resolved, err := filepath.EvalSymlinks(git); err == nil {
+			git = resolved
+		}
+		dir := filepath.Dir(git)
+		for _, relative := range []string{"bash.exe", "../bin/bash.exe", "../../bin/bash.exe"} {
+			candidates = append(candidates, filepath.Join(dir, relative))
+		}
+	}
+	for _, key := range []string{"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
+		if root := os.Getenv(key); root != "" {
+			if key == "LOCALAPPDATA" {
+				root = filepath.Join(root, "Programs")
+			}
+			candidates = append(candidates, filepath.Join(root, "Git", "bin", "bash.exe"))
+		}
+	}
+	for _, candidate := range candidates {
+		if bash, err := exec.LookPath(candidate); err == nil {
+			return bash, nil
+		}
+	}
+	return "", fmt.Errorf("Git Bash is required to execute the CI gate contract")
+}
+
+func TestGateBashMissingFails(t *testing.T) {
+	for _, key := range []string{"PATH", "ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
+		t.Setenv(key, t.TempDir())
+	}
+	if bash, err := gateBash(); err == nil {
+		t.Fatalf("missing Bash must fail, got %s", bash)
+	}
+}
+
 func TestGateResults(t *testing.T) {
 	files := workflows(t)
 	w, err := parse(files["go_build.yml"])
@@ -204,9 +259,9 @@ func TestGateResults(t *testing.T) {
 	}
 	step := gate["steps"].([]any)[0].(map[string]any)
 	script := step["run"].(string)
-	bash := "bash"
-	if runtime.GOOS == "windows" {
-		bash = `C:\Program Files\Git\bin\bash.exe`
+	bash, err := gateBash()
+	if err != nil {
+		t.Fatal(err)
 	}
 	keys := []string{"CONTRACT", "BUILD", "GINKGO", "INTEGRATION"}
 	check := func(t *testing.T, results map[string]string, wantSuccess bool) {
@@ -271,6 +326,10 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"native mac removed", "go_build.yml", ", \"macos-latest\"", ""},
 		{"Go matrix reduced", "ginkgo_test.yml", "\"1.23.x\", ", ""},
 		{"action changed", "go_build.yml", "actions/checkout@v4", "actions/checkout@v3"},
+		{"contract checkout credentials", "go_build.yml", "persist-credentials: false", "persist-credentials: true"},
+		{"contract checkout defaults", "go_build.yml", "        with:\n          persist-credentials: false\n", ""},
+		{"contract checkout pin", "go_build.yml", "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/checkout@v4"},
+		{"contract Go setup pin", "go_build.yml", "actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff", "actions/setup-go@v5"},
 		{"action inputs changed", "go_build.yml", "go-version: ${{ matrix.go }}", "go-version: '1.24.x'"},
 		{"steps reordered", "go_build.yml", "    - uses: actions/checkout@v4\n    - uses: actions/setup-go@v5", "    - uses: actions/setup-go@v5\n    - uses: actions/checkout@v4"},
 		{"integration native runner", "integration.yml", "${{ format('{0}-latest', matrix.os) }}", "ubuntu-latest"},
