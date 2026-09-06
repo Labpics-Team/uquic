@@ -18,13 +18,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var isolatedKeyUpdates = flag.Bool("quic-key-update-process", false, "run only the isolated key-update stress test")
+var isolatedKeyUpdates = flag.Bool("quic-key-update-process", false, "запустить только изолированный stress-test обновления ключей")
 
 func TestKeyUpdates(t *testing.T) {
 	const selection = "^TestKeyUpdates$"
 	const completed = "key-update assertions completed"
 	if !*isolatedKeyUpdates {
-		// Другие тесты могут ещё завершать соединения. Process-wide test knob
+		// Другие тесты могут ещё завершать соединения. Глобальная тестовая настройка
 		// принадлежит отдельному процессу, а не временно меняется в общем адресном
 		// пространстве. Исполняется тот же бинарь: -race и GOARCH сохраняются.
 		executable, err := os.Executable()
@@ -53,7 +53,7 @@ func TestKeyUpdates(t *testing.T) {
 		return
 	}
 	require.Equal(t, selection, flag.Lookup("test.run").Value.String())
-	handshake.KeyUpdateInterval = 1 // No restore: this process owns the setting until exit.
+	handshake.KeyUpdateInterval = 1 // Восстановление не нужно: процесс владеет настройкой до выхода.
 
 	var sentHeaders []*logging.ShortHeader
 	var receivedHeaders []*logging.ShortHeader
