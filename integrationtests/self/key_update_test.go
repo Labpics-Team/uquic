@@ -2,7 +2,11 @@ package self_test
 
 import (
 	"context"
+	"flag"
 	"io"
+	"os"
+	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
@@ -14,10 +18,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var isolatedKeyUpdates = flag.Bool("quic-key-update-process", false, "run only the isolated key-update stress test")
+
 func TestKeyUpdates(t *testing.T) {
-	origKeyUpdateInterval := handshake.KeyUpdateInterval
-	t.Cleanup(func() { handshake.KeyUpdateInterval = origKeyUpdateInterval })
-	handshake.KeyUpdateInterval = 1 // update keys as frequently as possible
+	const selection = "^TestKeyUpdates$"
+	const completed = "key-update assertions completed"
+	if !*isolatedKeyUpdates {
+		// Другие тесты могут ещё завершать соединения. Process-wide test knob
+		// принадлежит отдельному процессу, а не временно меняется в общем адресном
+		// пространстве. Исполняется тот же бинарь: -race и GOARCH сохраняются.
+		executable, err := os.Executable()
+		require.NoError(t, err)
+		ctx := context.Background()
+		if deadline, ok := t.Deadline(); ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, deadline)
+			defer cancel()
+		}
+		args := []string{
+			"-test.run=" + selection, "-test.v", "-test.count=1",
+			"-quic-key-update-process",
+			"-version=" + flag.Lookup("version").Value.String(),
+			"-qlog=" + strconv.FormatBool(enableQlog),
+		}
+		if deadline, ok := t.Deadline(); ok {
+			args = append(args, "-test.timeout="+time.Until(deadline).String())
+		}
+		// GSO/ECN и TIMESCALE_FACTOR наследуются без изменения.
+		output, err := exec.CommandContext(ctx, executable, args...).CombinedOutput()
+		t.Logf("isolated key-update process:\n%s", output)
+		require.NoError(t, err)
+		// Нулевой exit при отсутствии выбранного теста не является доказательством.
+		require.Contains(t, string(output), completed)
+		return
+	}
+	require.Equal(t, selection, flag.Lookup("test.run").Value.String())
+	handshake.KeyUpdateInterval = 1 // No restore: this process owns the setting until exit.
 
 	var sentHeaders []*logging.ShortHeader
 	var receivedHeaders []*logging.ShortHeader
@@ -97,4 +133,5 @@ func TestKeyUpdates(t *testing.T) {
 	t.Logf("Used %d key phases on outgoing and %d key phases on incoming packets.", keyPhasesSent, keyPhasesReceived)
 	require.Greater(t, keyPhasesReceived, 10)
 	require.InDelta(t, keyPhasesSent, keyPhasesReceived, 2)
+	t.Log(completed)
 }
