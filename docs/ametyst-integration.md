@@ -1,98 +1,68 @@
-# uQUIC as the QUIC-fingerprint foundation for Ametyst
+# Отпечаток QUIC и граница интеграции
 
-This note records the contract that the Ametyst integration depends on. It is
-documentation only — it describes how this fork is consumed; it does not change
-the parrot byte definitions or the dial path.
+## Контракт выбора
 
-Epic: **Ametyst as Labpics overlay/exit — Phantom & Serverless integration.**
+`CurrentChromeParrot()` возвращает выбранный в этой версии библиотеки `QUICID`.
+Конкретное значение задаёт [реализация](../u_parrot.go), а
+[u_parrot_test.go](../u_parrot_test.go) проверяет его разрешимость через
+`QUICID2Spec()`. Значение выбирается выпуском кода, не запросом к браузеру.
+Слово `Current` в имени API не означает «последняя версия Chrome в мире».
 
-## What this fork provides
+Потребитель может зафиксировать конкретный `QUICID` либо использовать accessor.
+В обоих случаях обновление зависимости остаётся явным действием потребителя.
+Новая версия upstream или этого форка не меняет уже работающий бинарь.
+[Исполняемый пример](../example_documentation_test.go) показывает получение
+спецификации без сетевого запроса.
 
-This is the Labpics fork of
-[refraction-networking/uquic](https://github.com/refraction-networking/uquic), a
-fork of [quic-go](https://github.com/quic-go/quic-go) that makes the unencrypted
-QUIC Initial Packet (header, frames, and the TLS ClientHello inside it)
-configurable so it can mimic a real browser's QUIC fingerprint. The presets are
-the "parrots" in [`u_parrot.go`](../u_parrot.go), resolved by `QUICID2Spec`.
+В Chrome-спецификациях `QUICID2Spec()` перемешивает порядок расширений при
+построении спецификации. `ApplyPreset` использует построенный порядок.
+Повторное использование одной спецификации не означает новую перестановку
+для каждого соединения. Потребитель, которому нужно изменение порядка,
+создаёт спецификацию отдельно для соединения. Нормализованное сравнение
+сортированных расширений не обнаруживает все различия их порядка.
 
-The parrot Ametyst rides on is `QUICChrome_146` — a Chrome QUIC fingerprint
-byte-validated against a live Chrome capture (see the `QUICChrome_146` doc
-comment and [`u_parrot_differential_test.go`](../u_parrot_differential_test.go),
-which gates the normalized JA4_QUIC-equivalent fingerprint and the QUIC
-transport-parameter fingerprint against a captured Chrome 149).
+## Что доказывает differential-тест
 
-## Dependency direction
+[u_parrot_differential_test.go](../u_parrot_differential_test.go) формирует
+локальный QUIC Initial, разбирает его через `clienthellod` и сравнивает
+нормализованный отпечаток, отдельные поля ClientHello и транспортные параметры
+с сохранённым наблюдением. Версия браузера, дата и метод захвата принадлежат
+самому эталону; здесь не поддерживается их ручная копия.
 
-```text
-refraction-networking/uquic (this fork)   <-- QUIC Initial-Packet fingerprint
-        |  imported by
-        v
-lemone112/vpn (Ametyst)                    <-- MASQUE transport / dial shim
-        |  consumed by
-        v
-phantom & serverless integration consumers
-```
+Изменение кода, нарушающее это соответствие, должно делать тест красным.
+Изменение внешнего Chrome **не меняет сохранённые входы теста** и само по себе
+не может вызвать его падение. Поэтому зелёный тест подтверждает соответствие
+снимку, но не его свежесть и не неотличимость полного сетевого поведения.
+Совпадение хеша не доказывает эквивалентность иной системе fingerprinting
+или правилам фильтрации конкретного оператора.
 
-The arrow is one-way. This fork knows nothing about Ametyst or its consumers; it
-only exports parrots and a dial path. Ametyst's MASQUE transport reuses the
-existing `UTransport.Dial` path with a resolved `QUICSpec` — **no functional
-change to this fork is required** for the integration. The only Ametyst-facing
-addition is a convenience accessor (below) so the shim need not hardcode a
-version string.
+## Как обновить эталон
 
-## The parrot-freshness contract
+Получите новое наблюдение настоящего браузера с версией, датой, окружением
+и способом разбора. Сохраните исходные данные, необходимые для повторения
+измерения; неподтверждённая версия не становится эталоном по имени.
+Сравните поля и поведение отдельно, а не только итоговый хеш.
 
-A parrot is only useful while it matches a browser that is actually current on
-the wire. **A stale browser version is itself a fingerprintable tell**: a client
-claiming to be a Chrome that no real user still runs stands out as much as one
-with a malformed ClientHello. Therefore:
+Если новый профиль отличается, добавьте соответствующую версионированную
+спецификацию, независимый эталон и проверки. Исторические спецификации не
+переписываются так, будто они всегда описывали новый браузер. Обновите accessor
+только в том же проверенном изменении. Полное обновление включает PR,
+обязательный удалённый CI и независимое ревью.
 
-- Only **current, byte-validated** browser parrots belong in the active set that
-  consumers resolve. The active Chrome parrot is the one returned by
-  `CurrentChromeParrot()`.
-- Validation is enforced by the differential tests, which compare the parrot's
-  reconstructed fingerprint (parsed by `clienthellod`) against captured ground
-  truth from a real, current Chrome. If a future Chrome changes its QUIC
-  ClientHello or transport parameters, those tests fail loudly — that failure is
-  the freshness signal.
-- Refreshing the parrot to a newer Chrome is a deliberate, reviewed change made
-  **in lockstep**: update the parrot bytes, re-capture ground truth, update the
-  differential test, and repoint `CurrentChromeParrot()`. The accessor gives the
-  contract a single source of truth so a refresh here propagates to Ametyst
-  without a code change there.
-- Existing validated parrots (`QUICChrome_115`, `QUICFirefox_116`, …) are kept
-  for reference and reproducibility; their **bytes are not to be modified** —
-  re-validating an outdated version against a browser that has moved on would only
-  weaken them.
+Не обновляйте ожидаемые байты только ради зелёного теста. Отсутствие нового
+захвата оставляет актуальность неподтверждённой; CI с сохранённым снимком не
+должен выдавать противоположное обещание. Публикация нового профиля не доказывает
+его доставку потребителям: их версии зависимостей проверяются отдельно.
 
-### Consuming the current parrot
+## Граница Ametyst
 
-```go
-spec, err := quic.QUICID2Spec(quic.CurrentChromeParrot())
-```
+Интеграция с Ametyst относится к стороне потребителя. Этот модуль владеет
+QUIC-спецификацией и dial-путём, но не маршрутизацией, политикой выхода или
+правами потребителя. Наличие интеграционного замысла не доказывает текущий
+deploy Ametyst, Phantom или Serverless. Фактическое подключение проверяется
+в коде соответствующего владельца, а не обратной зависимостью из uQUIC.
 
-`CurrentChromeParrot()` returns the `QUICID` of the currently validated Chrome
-parrot (today `QUICChrome_146`). Consumers that want a specific, pinned version
-may still name it directly (e.g. `quic.QUICChrome_146`); the accessor exists for
-consumers that want to track "whatever is current and validated."
-
-Note on extension/transport-parameter order: `QUICID2Spec` shuffles once per
-call, and `ApplyPreset` copies that order verbatim, so a reused `UTransport`
-presents a frozen order for its lifetime. Per-connection order variation
-requires building the spec per connection — that is the rotation layer's
-responsibility, not this fork's. JA4_QUIC sorts extensions, so order is
-invisible to it regardless; the shuffle is fidelity against order-sensitive
-(JA3-style) fingerprinting. See the differential test for the proof of both
-halves.
-
-## Research-grade disclaimer
-
-This fork inherits uQUIC's status: it is **research-grade, not peer-reviewed and
-not production-hardened** (see the [README disclaimer](../README.md#disclaimer)).
-The mimicry **may not be realistically indistinguishable** from the real QUIC
-client being mimicked, and the `QUICChrome_146` doc comment lists the known
-residual-fidelity gaps (Initial-packet frame ordering is randomized rather than
-Chrome's deterministic layout; `initial_rtt` is omitted). These are documented,
-not faked. Anyone relying on this fingerprint for censorship circumvention must
-understand those limits. Ametyst inherits this disclaimer — the fingerprint is a
-best-effort foundation, not a guarantee.
+Ограничения конкретной спецификации перечисляются рядом с её реализацией в
+`QUICID2Spec`. Документация не повышает сохранённый профиль до универсальной
+гарантии устойчивости к анализу трафика. Унаследованный исследовательский статус
+и [границы гарантий](../README.md#границы-гарантий) остаются применимыми.

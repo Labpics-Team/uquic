@@ -1,24 +1,39 @@
-# quic-go Prometheus / Grafana Local Development Setup
+# Как запустить локальный стенд метрик
 
-For local development and debugging, it can be useful to spin up a local Prometheus and Grafana instance.
+Этот каталог содержит стенд Prometheus/Grafana для разработки. Он не является
+production-конфигурацией: версии образов и сетевые привязки берутся из
+[docker-compose.yml](docker-compose.yml), адрес опрашиваемого приложения — из
+[prometheus.yml](prometheus.yml).
 
-Please refer to the [documentation](https://quic-go.net/docs/quic/metrics/) for how to configure quic-go to expose Prometheus metrics.
+Перед запуском приложение должно зарегистрировать QUIC tracer и экспортировать
+метрики. Общее устройство показано в
+[документации upstream](https://quic-go.net/docs/quic/metrics/); имена и сигнатуры
+текущего checkout проверяются через `go doc ./metrics` из корня репозитория.
 
-The configuration files in this directory assume that the application exposes the Prometheus endpoint at `http://localhost:5001/prometheus`:
-```go
-import "github.com/prometheus/client_golang/prometheus/promhttp"
+Из этого каталога:
 
-go func() {
-    http.Handle("/prometheus", promhttp.Handler())
-    log.Fatal(http.ListenAndServe("localhost:5001", nil))
-}()
+```sh
+docker compose config
+docker compose up -d
 ```
 
-Prometheus and Grafana can be started using Docker Compose:
+Проверьте состояние target в Prometheus и поступление метрик приложения.
+Запущенный контейнер не доказывает успешный опрос. Имя `host.docker.internal`
+в конфигурации должно разрешаться **из контейнера**; на хосте без такого
+механизма потребуется явная настройка адреса. Listener приложения на loopback
+не следует считать автоматически доступным из контейнерной сети.
 
-Running:
-```shell
-docker compose up
+[quic-go.json](quic-go.json) — модель примерной панели Grafana. Панель сама по
+себе не подтверждает полноту телеметрии, наличие алертов или выполнение SLO.
+
+Для остановки без удаления томов:
+
+```sh
+docker compose down
 ```
 
-[quic-go.json](./quic-go.json) contains the JSON model of an example Grafana dashboard.
+Не добавляйте `-v`, если требуется сохранить данные стенда. Перед запуском
+ограничьте доступ к опубликованному порту Grafana: исходная Compose-конфигурация
+не ограничивает его loopback-интерфейсом. Не выставляйте стенд в публичную сеть
+без аутентификации и сетевой защиты. Данные могут сохраняться в именованных
+томах, но backup и проверенное восстановление этот стенд не организует.

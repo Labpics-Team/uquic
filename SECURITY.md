@@ -1,20 +1,30 @@
-# Security Policy
+# Безопасность
 
-quic-go still in development. This means that there may be problems in our protocols,
-or there may be mistakes in our implementations.
-We take security vulnerabilities very seriously. If you discover a security issue,
-please bring it to our attention right away!
+Исследовательские ограничения библиотеки описаны в
+[README](README.md#границы-гарантий). Настройка QUIC-отпечатка не доказывает
+безопасность протокола, его реализации или неотличимость трафика.
 
-## Reporting a Vulnerability
+## Сообщение об уязвимости
 
-If you find a vulnerability that may affect live deployments -- for example, by exposing
-a remote execution exploit -- please report privately to us by emailing one of the maintainers you can find in README.md.
+Не публикуйте секреты и эксплуатационные детали уязвимости, затрагивающей
+работающие системы, в открытом PR или обсуждении. Отсутствие готового эксплойта
+само по себе не доказывает безопасность публичного сообщения.
 
-In case the vulnerability is with the upstream [quic-go](https://github.com/quic-go/quic-go) (which is likely the case), please report it directly to them privately [here](https://github.com/quic-go/quic-go/security/advisories/new).
+Для унаследованного кода следуйте приватному порядку соответствующего владельца:
+[политика uQUIC](https://github.com/refraction-networking/uquic/blob/master/SECURITY.md)
+или [приватный отчёт quic-go](https://github.com/quic-go/quic-go/security/advisories/new).
+Контакт, унаследованный из README uQUIC: `gaukas.wang@colorado.edu`.
+Эти каналы принадлежат upstream, а не службе поддержки Labpics.
 
-If the issue is an implementation weakness that cannot be immediately exploited or
-something not yet deployed, just discuss it openly.
+Для изменений самого форка сначала согласуйте с владельцем Labpics приватный
+канал передачи. Отдельный адрес приёма и срок ответа этот репозиторий не
+объявляет; документация не должна придумывать их или направлять закрытые данные
+в публичный issue. Наличие исходников и успешного CI не является обещанием
+независимого аудита безопасности.
 
-## Reporting a non security bug
+## Ошибки без последствий для безопасности
 
-For non-security bugs, please simply file a GitHub [issue](https://github.com/refraction-networking/uquic/issues/new).
+Обычные ошибки унаследованной реализации можно сообщать в
+[issues upstream uQUIC](https://github.com/refraction-networking/uquic/issues/new).
+Перед отправкой убедитесь, что воспроизводитель не содержит закрытых данных
+и проблема действительно относится к upstream, а не только к изменениям форка.
