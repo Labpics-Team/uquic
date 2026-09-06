@@ -11,28 +11,26 @@ import (
 	tls "github.com/refraction-networking/utls"
 )
 
-// Ground truth captured from a real Chrome 149.0.7827.104 QUIC handshake on
-// 2026-06-17 (relay capture in front of cloudflare-quic.com, parsed by
-// clienthellod — the same parser used here). These are order-INSENSITIVE
-// (normalized) values, so they are stable across Chrome's per-connection
-// extension/transport-parameter shuffling.
+// Сохранённое наблюдение Chrome 149.0.7827.104 от 2026-06-17: relay capture
+// перед cloudflare-quic.com, разобранный clienthellod — тем же parser, что здесь.
+// Значения нормализованы и не чувствительны к порядку расширений/параметров.
+// Это provenance исходного эталона, а не новый захват при каждом запуске теста.
 //
-// chrome149QUICNormHexID is clienthellod's normalized QUIC-ClientHello
-// fingerprint (NormHexID): a hash over ciphers + compression + SORTED extensions
+// chrome149QUICNormHexID — нормализованный QUIC-ClientHello fingerprint
+// clienthellod (NormHexID): ciphers + compression + сортированные extensions
 // + groups + sigalgs + ALPN + keyshare + PSK-modes + supported-versions +
-// cert-compress. Because it sorts extensions it is JA4_QUIC-equivalent in
-// normalization, which is what Russia's TSPU filters on. If a future Chrome
-// changes its QUIC ClientHello this fails loudly — the freshness signal ch15
-// exists to provide. The decomposed fields below are asserted too, so a failure
-// names the culprit instead of only flipping an opaque hash.
+// cert-compress. Равенство сохранённому наблюдению не доказывает эквивалентность
+// другой системе fingerprinting или правилам фильтрации конкретного оператора.
+// Будущий выпуск браузера не меняет эти замороженные входы. Для проверки свежести
+// нужен независимый новый захват; отдельные assertions ниже локализуют отклонение
+// реализации относительно именно этого наблюдения.
 const chrome149QUICNormHexID = "f82151be15528273"
 
-// chrome149QUICTransportParamsHexID is clienthellod's QUIC transport-parameter
-// fingerprint (TransportParameters.HexID). clienthellod sorts the parameter IDs
-// before hashing, so it is order-insensitive and stable across Chrome's
-// per-connection transport-parameter shuffle (verified: identical across two
-// independent captures). This gates the QUIC-transport-layer fingerprint, which
-// the TLS-ClientHello differential above does NOT cover.
+// chrome149QUICTransportParamsHexID — отпечаток транспортных параметров
+// clienthellod. Parser сортирует идентификаторы перед хешированием; этот
+// результат не чувствителен к их порядку. Исходное наблюдение зафиксировало
+// одинаковый результат двух захватов. Проверка относится к сохранённому
+// отпечатку транспорта, который не покрывает TLS-ClientHello-сравнение.
 const chrome149QUICTransportParamsHexID = "2f750907435c203d"
 
 var (
@@ -154,12 +152,10 @@ func dialParrotIntoClienthellod(t *testing.T, id QUICID) *clienthellod.GatheredC
 	return dialSpecIntoClienthellod(t, &spec)
 }
 
-// TestChrome146_DifferentialAgainstRealChrome is the load-bearing TLS-fidelity
-// gate: the parrot's QUIC ClientHello, packed by uQUIC and parsed by clienthellod,
-// must reproduce the IDENTICAL normalized fingerprint AND decomposed fields as a
-// real captured Chrome 149. An imperfect parrot is worse than none ("parrot is
-// dead"), so this is a hard gate. Asserting the decomposed fields (not just the
-// opaque hash) means a regression names the culprit.
+// TestChrome146_DifferentialAgainstRealChrome сравнивает собранный библиотекой
+// QUIC ClientHello с сохранённым нормализованным отпечатком и отдельными полями.
+// Отдельные assertions локализуют отклонение, а не только сигнализируют смену
+// хеша. Свежесть браузера и всё его сетевое поведение этот тест не устанавливает.
 func TestChrome146_DifferentialAgainstRealChrome(t *testing.T) {
 	ch := dialParrotIntoClienthellod(t, QUICChrome_146).ClientHello
 
@@ -186,12 +182,10 @@ func TestChrome146_DifferentialAgainstRealChrome(t *testing.T) {
 	}
 }
 
-// TestChrome146_TransportParametersMatchRealChrome gates the QUIC transport-
-// parameter fingerprint, which the TLS-ClientHello differential does not cover.
-// JA4_QUIC keys on the TLS ClientHello only, but a censor doing QUIC-transport-
-// parameter fingerprinting would distinguish a mismatched parrot — so for true
-// Chrome fidelity the transport parameters must match too. clienthellod sorts the
-// parameter IDs before hashing, so this fingerprint is order-insensitive.
+// TestChrome146_TransportParametersMatchRealChrome отдельно проверяет
+// сохранённый отпечаток QUIC transport parameters. TLS-ClientHello-сравнение
+// его не покрывает; сортировка идентификаторов не проверяет их порядок.
+// Не вошедшие в хеш значения требуют отдельных assertions ниже.
 func TestChrome146_TransportParametersMatchRealChrome(t *testing.T) {
 	tp := dialParrotIntoClienthellod(t, QUICChrome_146).TransportParameters
 	if tp.HexID != chrome149QUICTransportParamsHexID {
@@ -200,17 +194,12 @@ func TestChrome146_TransportParametersMatchRealChrome(t *testing.T) {
 	}
 }
 
-// TestChrome146_ExtensionOrderRandomizedPerSpecBuild proves the per-build half of
-// Chrome's order-shuffle: each QUICID2Spec call shuffles afresh, so building the
-// spec per connection yields a different extension order per connection (the
-// raw, order-sensitive fingerprint varies) while the normalized fingerprint stays
-// constant. RED proof: with a hardcoded (un-shuffled) slice the raw IDs collapse
-// to one value and this fails.
-//
-// NOTE: this is what makes per-connection variation POSSIBLE; it is not automatic.
-// ShuffleChromeTLSExtensions runs once per QUICID2Spec and ApplyPreset copies the
-// order verbatim, so the rotation layer must build the spec per connection to get
-// per-connection order variation — see TestChrome146_OrderFrozenWithinOneSpec.
+// TestChrome146_ExtensionOrderRandomizedPerSpecBuild проверяет конечную выборку
+// новых спецификаций: наблюдается более одного порядка при неизменном
+// нормализованном отпечатке. Это не гарантия разных порядков каждой пары
+// соединений и не доказательство равномерности случайного распределения.
+// Перемешивание выполняется при QUICID2Spec, не при повторном ApplyPreset;
+// повторное использование спецификации проверяется отдельно ниже.
 func TestChrome146_ExtensionOrderRandomizedPerSpecBuild(t *testing.T) {
 	const builds = 6
 	rawIDs := make(map[string]struct{})
@@ -226,13 +215,10 @@ func TestChrome146_ExtensionOrderRandomizedPerSpecBuild(t *testing.T) {
 	}
 }
 
-// TestChrome146_OrderFrozenWithinOneSpec documents the flip side, so the property
-// is tested rather than assumed: a single spec reused across connections presents
-// the SAME extension order every time (ShuffleChromeTLSExtensions shuffled once at
-// build, ApplyPreset copies verbatim). This is why a long-lived UTransport keeps a
-// frozen order and the rotation layer must build the spec per connection. The
-// normalized fingerprint is identical either way, and JA4_QUIC sorts extensions,
-// so this freeze does not change the JA4 a censor matches.
+// TestChrome146_OrderFrozenWithinOneSpec сравнивает порядок расширений двух
+// соединений с одной спецификацией. ApplyPreset использует уже построенный
+// порядок, поэтому длительно живущий UTransport не означает новую перестановку.
+// Проверка нормализованного отпечатка сама по себе не обнаружила бы этот эффект.
 func TestChrome146_OrderFrozenWithinOneSpec(t *testing.T) {
 	spec, err := QUICID2Spec(QUICChrome_146)
 	if err != nil {
@@ -246,16 +232,12 @@ func TestChrome146_OrderFrozenWithinOneSpec(t *testing.T) {
 	}
 }
 
-// TestChrome146_TransportParameterValuesMatchRealChrome locks the transport-
-// parameter VALUES that clienthellod's TransportParameters.HexID does NOT hash.
-// That fingerprint hashes the values of only the standard RFC parameters plus the
-// sorted set of ALL parameter IDs — so a value-only drift in
-// google_connection_options or max_datagram_frame_size would slip past
-// TestChrome146_TransportParametersMatchRealChrome (verified by adversarial
-// review: changing "ORIG"->"XXXX" or 65536->32768 left that test green). These two
-// are Chrome-specific values — google_connection_options was historically mis-set
-// to "B2ON"/"RVCM" before the correct "ORIG" — so they get a direct regression
-// guard at the spec level.
+// TestChrome146_TransportParameterValuesMatchRealChrome закрепляет значения,
+// которые не входят в TransportParameters.HexID: google_connection_options и
+// max_datagram_frame_size. В исходном adversarial review замена ORIG на XXXX
+// либо 65536 на 32768 не меняла предыдущий fingerprint-test; поэтому значения
+// имеют отдельные assertions. Ожидаемые значения относятся к сохранённому
+// наблюдению, не ко всем будущим версиям браузера.
 func TestChrome146_TransportParameterValuesMatchRealChrome(t *testing.T) {
 	spec, err := QUICID2Spec(QUICChrome_146)
 	if err != nil {

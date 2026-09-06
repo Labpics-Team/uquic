@@ -41,12 +41,9 @@ func TestDialPanic(t *testing.T) {
 
 }
 
-// TestCurrentChromeParrot pins the freshness-contract accessor: it must return a
-// Chrome QUICID that resolves to a valid spec via QUICID2Spec, so consumers (the
-// Ametyst MASQUE transport in lemone112/vpn) can track the current validated
-// Chrome parrot without hardcoding a version. The concrete value is intentionally
-// asserted so that repointing the accessor to a newer Chrome is a deliberate,
-// reviewed change made in lockstep with the differential test.
+// TestCurrentChromeParrot проверяет выбранный идентификатор и разрешимость
+// его спецификации. Фиксация конкретного значения делает замену явным
+// изменением контракта. Актуальность внешнего браузера этот тест не проверяет.
 func TestCurrentChromeParrot(t *testing.T) {
 	id := CurrentChromeParrot()
 

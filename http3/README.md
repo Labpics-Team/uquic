@@ -1,9 +1,30 @@
-# HTTP/3
+# HTTP/3 — справка
 
-[![Documentation](https://img.shields.io/badge/docs-quic--go.net-red?style=flat)](https://quic-go.net/docs/)
-[![PkgGoDev](https://pkg.go.dev/badge/github.com/quic-go/quic-go/http3)](https://pkg.go.dev/github.com/quic-go/quic-go/http3)
+Пакет содержит HTTP/3-клиент и сервер. Клиентский `Transport` реализует
+`http.RoundTripper`; поле конфигурации называется `QUICConfig`.
+`RoundTripper` сохранён как deprecated alias `Transport`. Функции
+`GetURoundTripper` в текущем пакете нет.
 
-This package implements HTTP/3 ([RFC 9114](https://datatracker.ietf.org/doc/html/rfc9114)), including QPACK ([RFC 9204](https://datatracker.ietf.org/doc/html/rfc9204)) and HTTP Datagrams ([RFC 9297](https://datatracker.ietf.org/doc/html/rfc9297)).
-It aims to provide feature parity with the standard library's HTTP/1.1 and HTTP/2 implementation.
+Точную поверхность текущего checkout получайте из исходников:
 
-Detailed documentation can be found on [quic-go.net](https://quic-go.net/docs/).
+```sh
+go doc ./http3 Transport
+go doc ./http3 Transport.Dial
+go doc . UTransport.DialEarly
+```
+
+`Transport.Dial` позволяет приложению предоставить собственный dial callback,
+возвращающий `quic.EarlyConnection`; `UTransport.DialEarly` является
+низкоуровневым uQUIC-путём. `Dial == nil` использует обычный путь HTTP/3
+transport и не подключает браузерный профиль автоматически.
+
+Время жизни ресурсов, созданных callback вне `Transport`, остаётся обязанностью
+владельца этих ресурсов. Закрытие HTTP/3 transport не следует трактовать как
+универсальную очистку внешнего `UTransport` или UDP socket без проверки
+конкретного пути.
+
+Сигнатуры принадлежат [`transport.go`](transport.go) и
+[`u_transport.go`](../u_transport.go); этот документ не дублирует полный API.
+Протокольные источники: [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114),
+[RFC 9204](https://www.rfc-editor.org/rfc/rfc9204) и
+[RFC 9297](https://www.rfc-editor.org/rfc/rfc9297).

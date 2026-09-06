@@ -41,28 +41,23 @@ var (
 	QUICChrome_115_IPv6 = QUICID{quicChrome, "115_ip6", "beeb454235791d5c"} // IPv6
 	// TODO: add Chrome fingerprints with Token and PSK extension
 
-	// QUICChrome_146 mimics a current Chrome (Initial = Chrome 143 transport, TLS = Chrome 143/146 QUIC
-	// ClientHello). Spec adapted from sardanioss/quic-go and sardanioss/httpcloak (both MIT) and the
-	// HelloChrome_143_QUIC body in sardanioss/utls (BSD-3), to which HelloChrome_146_QUIC aliases.
-	// See QUICID2Spec for the residual-fidelity notes versus a native Chrome-146 build.
+	// QUICChrome_146 задаёт сохранённый профиль: Initial = Chrome 143 transport,
+	// TLS = Chrome 143/146 QUIC ClientHello. Источники: sardanioss/quic-go и
+	// sardanioss/httpcloak (оба MIT), HelloChrome_143_QUIC из sardanioss/utls
+	// (BSD-3), на который ссылается HelloChrome_146_QUIC. Ограничения сходства
+	// с нативным Chrome-146 перечислены в QUICID2Spec; свежесть не заявлена.
 	QUICChrome_146 = QUICID{quicChrome, "146", "c0ffee1d0fcad146"}
 
 	// TODO: add more QUIC clients and versions
 )
 
-// CurrentChromeParrot returns the QUICID of the Chrome parrot that this fork
-// currently considers byte-validated against a live Chrome build (see the
-// QUICChrome_146 doc comment and u_parrot_differential_test.go for the gate).
-//
-// It exists so a consumer (e.g. the Ametyst MASQUE transport in lemone112/vpn)
-// can resolve "the current, validated Chrome fingerprint" without hardcoding a
-// version-specific identifier. When the parrot is refreshed to a newer Chrome,
-// this accessor is repointed in lockstep with the differential test, so the
-// freshness contract has a single source of truth and consumers need no change.
-//
-// This is a convenience accessor only; it returns one of the package-level
-// QUICID values and resolves the same spec as QUICID2Spec(CurrentChromeParrot()).
-// See docs/ametyst-integration.md for the dependency direction and contract.
+// CurrentChromeParrot возвращает QUICID, выбранный этой версией библиотеки.
+// Конкретный идентификатор и его соответствие сохранённому эталону проверяют
+// u_parrot_test.go и u_parrot_differential_test.go. Функция не получает новое
+// наблюдение браузера и не подтверждает актуальность профиля во внешней сети.
+// Обновление accessor требует совместной проверки спецификации и эталона;
+// уже собранный потребитель не обновляется без явной смены зависимости.
+// Граница гарантии описана в docs/ametyst-integration.md.
 func CurrentChromeParrot() QUICID {
 	return QUICChrome_146
 }
@@ -304,33 +299,24 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 			},
 		}, nil
 	case QUICChrome_146:
-		// Chrome 146 QUIC parrot.
+		// Сохранённая Chrome-спецификация. Исходная атрибуция:
+		// sardanioss/quic-go и sardanioss/httpcloak (MIT), HelloChrome_143_QUIC
+		// из sardanioss/utls (BSD-3); aliases 146 → 145 → 143 в том источнике.
+		// Профиль выражен типами закреплённого refraction-networking/utls;
+		// отдельное обновление зависимости для его построения не требуется.
 		//
-		// Spec adapted from sardanioss/quic-go and sardanioss/httpcloak (both MIT) and the
-		// HelloChrome_143_QUIC body in sardanioss/utls (BSD-3) — HelloChrome_146_QUIC aliases
-		// to HelloChrome_145_QUIC aliases to HelloChrome_143_QUIC. Byte-validated by sardanioss
-		// against quic.browserleaks.com for Chrome 143 (transport) / 146 (TLS).
+		// u_parrot_differential_test.go сравнивает результат с сохранённым
+		// наблюдением Chrome 149.0.7827.104 за июнь 2026 года. Это не доказательство
+		// полного равенства TLS/QUIC во всех версиях 146–149 или совместимости
+		// с иной системой fingerprinting: область сравнения задают assertions.
 		//
-		// Re-validated 2026-06 against a live Chrome 149.0.7827.104 QUIC capture: the QUIC TLS
-		// ClientHello (the JA4_QUIC surface) is unchanged across 146→149, so this parrot's
-		// normalized fingerprint matches real Chrome 149 (see u_parrot_differential_test.go).
-		//
-		// Re-expressed in refraction-networking/utls types (the pin this repo resolves, which
-		// tops out at the HelloChrome_133 preset) rather than pasted from sardanioss's API. The
-		// pinned utls already exports every primitive Chrome 146 needs — the X25519MLKEM768
-		// post-quantum keyshare, ApplicationSettingsExtensionNew (ALPS codepoint 17613),
-		// BoringGREASEECH (GREASE ECH 65037), and the QUIC transport parameter types — so no
-		// utls bump (and therefore no StoreSession drop) is required.
-		//
-		// Residual fidelity gap versus a native sardanioss/utls Chrome-146 build:
-		//   - Initial-packet frame layout uses uQUIC's QUICRandomFrames builder, which inserts
-		//     PING/PADDING randomly and shuffles, whereas Chrome's real layout is deterministic
-		//     (CRYPTO ~80B, PING after every 2 CRYPTO + trailing PING, interspersed single 0x00
-		//     PADDING, ClientHello split across 2 packets). The frame *counts* are Chrome-like;
-		//     the exact ordering is not. uQUIC has no deterministic Chrome frame builder.
-		//   - initial_rtt (0x3127) is omitted: it carries a per-host measured RTT and uQUIC's
-		//     QUICTransportParametersExtension has no facility to compute and inject it.
-		// Both are documented, not faked. See the project report for the validation gate.
+		// Ограничения модели сохранены: QUICRandomFrames случайно раскладывает
+		// CRYPTO/PING/PADDING и не воспроизводит детерминированный Chrome layout
+		// из исходных заметок (разбиение ClientHello на пакеты, PING после CRYPTO,
+		// одиночный PADDING). Сходство количества фреймов не означает равенство
+		// их порядка. initial_rtt (0x3127) не передаётся: этот путь не вычисляет
+		// и не внедряет измеренный RTT адресата. Тест нормализованного отпечатка
+		// не скрывает и не закрывает эти ограничения.
 		return QUICSpec{
 			InitialPacketSpec: InitialPacketSpec{
 				SrcConnIDLength:        0, // Chrome uses an empty source connection ID
@@ -360,18 +346,12 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 				CompressionMethods: []uint8{
 					0x0, // no compression
 				},
-				// Chrome's QUIC ClientHello contains NO GREASE TLS extensions (GREASE lives only in
-				// the transport parameters) but, like Chrome's HTTP/2 ClientHello, randomizes its
-				// extension order. Verified 2026-06 against two live Chrome 149 QUIC captures
-				// (parsed by clienthellod): the 11-extension set is constant
-				// [0,10,13,16,27,43,45,51,57,17613,65037] while the order is fully permuted between
-				// connections. ShuffleChromeTLSExtensions reproduces this, exactly like the
-				// QUICChrome_115 parrot — but it shuffles ONCE, when QUICID2Spec is called, and
-				// ApplyPreset then copies the order verbatim. A reused UTransport therefore keeps a
-				// single frozen order for its lifetime; per-connection order variation requires
-				// building the spec per connection (the rotation layer's responsibility). JA4_QUIC
-				// sorts extensions, so order is invisible to it regardless — the shuffle is fidelity
-				// against order-sensitive (JA3-style) fingerprinting, not a JA4 concern.
+				// ShuffleChromeTLSExtensions вызывается при построении спецификации.
+				// ApplyPreset сохраняет полученный порядок: повторное использование
+				// спецификации не создаёт новую перестановку для каждого соединения.
+				// Набор расширений сверяется с сохранённым наблюдением, а отдельный
+				// тест проверяет порядок. Нормализованный хеш сортирует расширения
+				// и не является доказательством эквивалентности порядка на проводе.
 				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
 					&tls.ApplicationSettingsExtensionNew{ // application_settings (17613)
 						SupportedProtocols: []string{"h3"},
@@ -413,9 +393,9 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 							tls.CertCompressionBrotli,
 						},
 					},
-					// quic_transport_parameters (57). Chrome shuffles the parameter order per
-					// session; ShuffleQUICTransportParameters reproduces that. Chrome does NOT
-					// send active_connection_id_limit, max_ack_delay, or disable_active_migration.
+					// Параметры сохранённого наблюдения. Порядок задаёт перемешивание при
+					// построении спецификации; отсутствующие здесь параметры не являются
+					// утверждением об их отсутствии во всех будущих версиях браузера.
 					ShuffleQUICTransportParameters(&tls.QUICTransportParametersExtension{
 						TransportParameters: tls.TransportParameters{
 							tls.InitialMaxStreamsUni(103),
@@ -437,7 +417,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 							// match the captured Chrome 149 transport-parameter fingerprint.
 							&tls.FakeQUICTransportParameter{ // google_connection_options (0x3128)
 								Id:  0x3128,
-								Val: []byte{0x4F, 0x52, 0x49, 0x47}, // "ORIG" — current stable-Chrome default (Chromium kQuicOptions)
+								Val: []byte{0x4F, 0x52, 0x49, 0x47}, // "ORIG" — значение сохранённого наблюдения
 							},
 							tls.MaxDatagramFrameSize(65536),
 							tls.InitialMaxStreamsBidi(100),

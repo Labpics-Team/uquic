@@ -1,6 +1,12 @@
-# Usage
+# Внутренний двусвязный список
 
-This is the Go standard library implementation of a linked list 
-(https://golang.org/src/container/list/list.go), with the following modifications:
-* it uses Go generics
-* it allows passing in a `sync.Pool` (via the `NewWithPool` constructor) to reduce allocations of `Element` structs
+Основан на [container/list стандартной библиотеки Go](https://go.dev/src/container/list/list.go).
+Авторские уведомления и исходная лицензия сохранены в исходниках и
+[LICENSE](../../../LICENSE).
+
+Отличия реализации: параметр типа элемента и необязательный `sync.Pool`,
+передаваемый в `NewWithPool`. Пул позволяет переиспользовать элементы;
+наличие пула само по себе не обещает нулевых аллокаций для любого сценария.
+
+Интерфейс и владение элементами определены в [linkedlist.go](linkedlist.go).
+Это внутренний пакет, не дополнительная публичная точка входа uQUIC.
