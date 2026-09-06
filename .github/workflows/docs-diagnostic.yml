@@ -2,33 +2,46 @@ name: Documentation source snapshot
 on:
   push:
     branches: [docs/document-integrity-20260906]
-permissions:
-  contents: read
+permissions: {}
+concurrency:
+  group: documentation-source-snapshot
+  cancel-in-progress: false
 jobs:
   snapshot:
     if: github.event_name == 'push' && github.actor == 'lemone112' && github.repository_id == '1270346127'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - shell: bash
+          node-version: '24'
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+        with:
+          version: 11.13.1
+          dest: ${{ runner.temp }}/pnpm
+      - name: Capture public pinned source and locked tooling without repository credentials
+        shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git bundle create "$RUNNER_TEMP/uquic.bundle" HEAD
-          git bundle verify "$RUNNER_TEMP/uquic.bundle"
-          cd "$RUNNER_TEMP"
-          sha256sum uquic.bundle > SHA256SUMS
+          mkdir "$RUNNER_TEMP/export"
+          git -c core.hooksPath=/dev/null clone --no-checkout https://github.com/Labpics-Team/lab-icons.git "$RUNNER_TEMP/icons"
+          cd "$RUNNER_TEMP/icons"
+          git -c core.hooksPath=/dev/null checkout --detach 3f999aed2696d54a02fb95657059aba545ea131d
+          test "$(git rev-parse HEAD)" = 3f999aed2696d54a02fb95657059aba545ea131d
+          git bundle create "$RUNNER_TEMP/export/lab-icons.bundle" HEAD
+          git bundle verify "$RUNNER_TEMP/export/lab-icons.bundle"
+          pnpm install --frozen-lockfile --ignore-scripts
+          tar -czf "$RUNNER_TEMP/export/node-modules.tar.gz" node_modules
+          npm pack pnpm@11.13.1 --ignore-scripts --pack-destination "$RUNNER_TEMP/export"
+          cp "$(command -v node)" "$RUNNER_TEMP/export/node"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/export/identity"
+          cd "$RUNNER_TEMP/export"
+          sha256sum lab-icons.bundle node-modules.tar.gz pnpm-*.tgz node identity > SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: documentation-source-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/uquic.bundle
-            ${{ runner.temp }}/SHA256SUMS
+          name: documentation-inputs-${{ github.sha }}
+          path: ${{ runner.temp }}/export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
