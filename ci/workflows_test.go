@@ -87,9 +87,71 @@ func parse(raw []byte) (map[string]any, error) {
 //go:embed testdata/native-jobs.yml
 var nativeJobsYAML []byte
 
+func validateArchitectureWorkflow(raw []byte) error {
+	w, err := parse(raw)
+	if err != nil {
+		return fmt.Errorf("architecture-observer-vendor.yml: %w", err)
+	}
+	wantMeta := map[string]any{
+		"name": "architecture-observer-vendor",
+		"on": map[string]any{
+			"pull_request": nil,
+			"merge_group":  nil,
+			"push":         map[string]any{"branches": []any{"main"}},
+		},
+		"permissions": map[string]any{"contents": "read"},
+	}
+	jobs, ok := w["jobs"].(map[string]any)
+	if !ok || len(jobs) != 1 {
+		return fmt.Errorf("architecture-observer-vendor.yml: expected one observe job")
+	}
+	delete(w, "jobs")
+	delete(w, "concurrency")
+	if !reflect.DeepEqual(w, wantMeta) {
+		return fmt.Errorf("architecture-observer-vendor.yml: metadata changed")
+	}
+	observe, ok := jobs["observe"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("architecture-observer-vendor.yml: observe job missing")
+	}
+	if observe["name"] != "architecture evidence (vendored)" || observe["runs-on"] != "ubuntu-latest" {
+		return fmt.Errorf("architecture-observer-vendor.yml: observe identity changed")
+	}
+	if timeout, ok := observe["timeout-minutes"].(int); !ok || timeout != 25 {
+		return fmt.Errorf("architecture-observer-vendor.yml: timeout changed")
+	}
+	if _, ok := observe["continue-on-error"]; ok {
+		return fmt.Errorf("architecture-observer-vendor.yml: failure tolerance is forbidden")
+	}
+	steps, ok := observe["steps"].([]any)
+	if !ok || len(steps) != 5 {
+		return fmt.Errorf("architecture-observer-vendor.yml: step inventory changed")
+	}
+	wantNames := []string{"Checkout full Git evidence", "Select Node.js runtime", "Install canonical pinned native parser", "Verify vendored observer before running it", "Observe and enforce product architecture"}
+	for i, rawStep := range steps {
+		step, ok := rawStep.(map[string]any)
+		if !ok || step["name"] != wantNames[i] {
+			return fmt.Errorf("architecture-observer-vendor.yml: step %d changed", i)
+		}
+	}
+	last := steps[len(steps)-1].(map[string]any)
+	run, _ := last["run"].(string)
+	if !strings.Contains(run, "semantic-admission.mjs") {
+		return fmt.Errorf("architecture-observer-vendor.yml: semantic admission missing")
+	}
+	return nil
+}
+
 func validate(files map[string][]byte) error {
-	if len(files) != 3 {
-		return fmt.Errorf("expected exactly the three native workflows")
+	if len(files) != 4 {
+		return fmt.Errorf("expected exactly three native workflows plus architecture observer")
+	}
+	arch, ok := files["architecture-observer-vendor.yml"]
+	if !ok {
+		return fmt.Errorf("architecture-observer-vendor.yml missing")
+	}
+	if err := validateArchitectureWorkflow(arch); err != nil {
+		return err
 	}
 	nativeJobs, err := parse(nativeJobsYAML)
 	if err != nil {
@@ -186,6 +248,31 @@ func workflows(t *testing.T) map[string][]byte {
 func TestNativeWorkflowContract(t *testing.T) {
 	if err := validate(workflows(t)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestArchitectureWorkflowRejectsTampering(t *testing.T) {
+	files := workflows(t)
+	raw := files["architecture-observer-vendor.yml"]
+	cases := []struct {
+		name, before, after string
+	}{
+		{"write permission", "contents: read", "contents: write"},
+		{"runner drift", "runs-on: ubuntu-latest", "runs-on: windows-latest"},
+		{"semantic admission removed", "semantic-admission.mjs", "semantic-admission-disabled.mjs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mutated := strings.Replace(string(raw), tc.before, tc.after, 1)
+			if mutated == string(raw) {
+				t.Fatal("mutation did not change workflow")
+			}
+			copyFiles := workflows(t)
+			copyFiles["architecture-observer-vendor.yml"] = []byte(mutated)
+			if err := validate(copyFiles); err == nil {
+				t.Fatal("tampered architecture workflow unexpectedly passed")
+			}
+		})
 	}
 }
 
