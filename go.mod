@@ -1,6 +1,6 @@
 module github.com/refraction-networking/uquic
 
-go 1.24.0
+go 1.26.0
 
 require (
 	github.com/francoispqt/gojay v1.2.13
@@ -9,16 +9,16 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/quic-go/qpack v0.5.1
 	github.com/refraction-networking/clienthellod v0.5.0-alpha2
-	github.com/refraction-networking/utls v1.7.4-0.20250521174854-63aeec73c564
+	github.com/refraction-networking/utls v1.8.3-0.20260924071514-88ba76ae4ee3
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/mock v0.5.2
-	golang.org/x/crypto v0.38.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6
-	golang.org/x/net v0.40.0
-	golang.org/x/sync v0.14.0
-	golang.org/x/sys v0.33.0
+	golang.org/x/net v0.58.0
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
 	golang.org/x/time v0.11.0
-	golang.org/x/tools v0.33.0
+	golang.org/x/tools v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -26,7 +26,6 @@ require (
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/cloudflare/circl v1.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
@@ -40,7 +39,7 @@ require (
 	github.com/prometheus/common v0.64.0 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
-	golang.org/x/mod v0.24.0 // indirect
-	golang.org/x/text v0.25.0 // indirect
+	golang.org/x/mod v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )
