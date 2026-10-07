@@ -6,37 +6,201 @@ on:
 permissions:
   contents: read
 
+# Каждый вариант запускает полный пакет в отдельной прежней hosted-среде.
+# Таймеры, тела тестов и параметры нагрузки остаются прежними.
 jobs:
   integration:
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu"]
-        go: ["1.23.x", "1.24.x"]
-        race: [false]
-        use32bit: [false]
         include:
+          - os: "ubuntu"
+            go: "1.23.x"
+            race: false
+            use32bit: false
+            mode: "v1"
+            version: 1
+          - os: "ubuntu"
+            go: "1.23.x"
+            race: false
+            use32bit: false
+            mode: "v2"
+            version: 2
+          - os: "ubuntu"
+            go: "1.23.x"
+            race: false
+            use32bit: false
+            mode: "gso"
+            version: 1
+          - os: "ubuntu"
+            go: "1.23.x"
+            race: false
+            use32bit: false
+            mode: "ecn"
+            version: 1
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+            mode: "v1"
+            version: 1
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+            mode: "v2"
+            version: 2
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+            mode: "gso"
+            version: 1
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+            mode: "ecn"
+            version: 1
           - os: "ubuntu"
             go: "1.24.x"
             race: true
+            use32bit: false
+            mode: "v1"
+            version: 1
           - os: "ubuntu"
             go: "1.24.x"
+            race: true
+            use32bit: false
+            mode: "gso"
+            version: 1
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
             use32bit: true
+            mode: "v1"
+            version: 1
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: true
+            mode: "v2"
+            version: 2
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: true
+            mode: "gso"
+            version: 1
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: true
+            mode: "ecn"
+            version: 1
           - os: "windows"
             go: "1.24.x"
             race: false
+            use32bit: false
+            mode: "v1"
+            version: 1
+          - os: "windows"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+            mode: "v2"
+            version: 2
           - os: "macos"
             go: "1.24.x"
             race: false
+            use32bit: false
+            mode: "v1"
+            version: 1
+          - os: "macos"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+            mode: "v2"
+            version: 2
     runs-on: ${{ format('{0}-latest', matrix.os) }}
     timeout-minutes: 30
     defaults:
       run:
-        shell: bash # by default Windows uses PowerShell, which uses a different syntax for setting environment variables
+        shell: bash
     env:
-      DEBUG: false # set this to true to export qlogs and save them as artifacts
+      DEBUG: false
       TIMESCALE_FACTOR: 3
-    name: "Integration (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
+    name: "Self integration (${{ matrix.os }}, Go ${{ matrix.go }}, ${{ matrix.mode }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Set qlogger
+        if: env.DEBUG == 'true'
+        run: echo "QLOGFLAG= -qlog" >> $GITHUB_ENV
+      - name: Enable race detector
+        if: ${{ matrix.race }}
+        run: echo "RACEFLAG= -race" >> $GITHUB_ENV
+      - name: Enable 32-bit build
+        if: ${{ matrix.use32bit }}
+        run: echo "GOARCH=386" >> $GITHUB_ENV
+      - run: go version
+      - name: Disable GSO
+        if: matrix.mode == 'gso'
+        run: echo "QUIC_GO_DISABLE_GSO=true" >> $GITHUB_ENV
+      - name: Disable ECN
+        if: matrix.mode == 'ecn'
+        run: echo "QUIC_GO_DISABLE_ECN=true" >> $GITHUB_ENV
+      - name: Run self tests
+        if: success() || failure()
+        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=${{ matrix.version }} ${{ env.QLOGFLAG }}
+      - name: save qlogs
+        if: ${{ always() && env.DEBUG == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qlogs-self-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}-${{ matrix.mode }}
+          path: integrationtests/self/*.qlog
+          retention-days: 7
+
+  ancillary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: "ubuntu"
+            go: "1.23.x"
+            race: false
+            use32bit: false
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: true
+            use32bit: false
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: true
+          - os: "windows"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+          - os: "macos"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+    runs-on: ${{ format('{0}-latest', matrix.os) }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBUG: false
+      TIMESCALE_FACTOR: 3
+    name: "Integration tools (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -56,29 +220,87 @@ jobs:
         run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/tools/...
       - name: Run version negotiation tests
         run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/versionnegotiation ${{ env.QLOGFLAG }}
-      - name: Run self tests, using QUIC v1
-        if: success() || failure() # run this step even if the previous one failed
-        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=1 ${{ env.QLOGFLAG }}
-      - name: Run self tests, using QUIC v2
-        if: ${{ !matrix.race && (success() || failure()) }} # run this step even if the previous one failed
-        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=2 ${{ env.QLOGFLAG }}
-      - name: Run self tests, with GSO disabled
-        if: ${{ matrix.os == 'ubuntu' && (success() || failure()) }} # run this step even if the previous one failed
-        env:
-          QUIC_GO_DISABLE_GSO: true
-        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=1 ${{ env.QLOGFLAG }}
-      - name: Run self tests, with ECN disabled
-        if: ${{ !matrix.race && matrix.os == 'ubuntu' && (success() || failure()) }} # run this step even if the previous one failed
-        env:
-          QUIC_GO_DISABLE_ECN: true
-        run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=1 ${{ env.QLOGFLAG }}
+      - name: save qlogs
+        if: ${{ always() && env.DEBUG == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qlogs-ancillary-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}
+          path: integrationtests/self/*.qlog
+          retention-days: 7
+
+  benchmarks:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: "ubuntu"
+            go: "1.23.x"
+            race: false
+            use32bit: false
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+          - os: "ubuntu"
+            go: "1.24.x"
+            race: false
+            use32bit: true
+          - os: "windows"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+          - os: "macos"
+            go: "1.24.x"
+            race: false
+            use32bit: false
+    runs-on: ${{ format('{0}-latest', matrix.os) }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBUG: false
+      TIMESCALE_FACTOR: 3
+    name: "Integration benchmarks (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.use32bit && ', 32-bit' || '' }})"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Set qlogger
+        if: env.DEBUG == 'true'
+        run: echo "QLOGFLAG= -qlog" >> $GITHUB_ENV
+      - name: Enable race detector
+        if: ${{ matrix.race }}
+        run: echo "RACEFLAG= -race" >> $GITHUB_ENV
+      - name: Enable 32-bit build
+        if: ${{ matrix.use32bit }}
+        run: echo "GOARCH=386" >> $GITHUB_ENV
+      - run: go version
       - name: Run benchmarks
-        if: ${{ !matrix.race }}
         run: go test -v -run=^$ -timeout 5m -shuffle=on -bench=. ./integrationtests/self
       - name: save qlogs
         if: ${{ always() && env.DEBUG == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: qlogs-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}
+          name: qlogs-benchmarks-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}
           path: integrationtests/self/*.qlog
           retention-days: 7
+
+  gate:
+    name: Integration complete
+    needs: [integration, ancillary, benchmarks]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every integration matrix
+        shell: bash
+        env:
+          SELF: ${{ needs.integration.result }}
+          ANCILLARY: ${{ needs.ancillary.result }}
+          BENCHMARKS: ${{ needs.benchmarks.result }}
+        run: |
+          test "$SELF" = success
+          test "$ANCILLARY" = success
+          test "$BENCHMARKS" = success
