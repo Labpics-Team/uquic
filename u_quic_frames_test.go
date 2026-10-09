@@ -18,8 +18,7 @@ func TestQUICFrames(t *testing.T) {
 	}
 
 	// verify that the crypto frames would actually assemble the original crypto data
-	r := bytes.NewReader(resultQUICPayload)
-	qchframes, err := clienthellod.ReadAllFrames(r)
+	qchframes, err := readQUICFrames(resultQUICPayload)
 	if err != nil {
 		t.Fatalf("Failed to read QUIC frames: %v", err)
 	}
@@ -44,8 +43,7 @@ func TestQUICRandomFrames(t *testing.T) {
 	}
 
 	// verify that the crypto frames would actually assemble the original crypto data
-	r := bytes.NewReader(resultQUICPayload)
-	qchframes, err := clienthellod.ReadAllFrames(r)
+	qchframes, err := readQUICFrames(resultQUICPayload)
 	if err != nil {
 		t.Fatalf("Failed to read QUIC frames: %v", err)
 	}
@@ -69,12 +67,43 @@ func TestQUICRandomFrames(t *testing.T) {
 		}
 	}
 
-	if pingCount < 2 || pingCount > 8 {
-		t.Fatalf("PING frame count mismatch: got %d, want 2-8", pingCount)
+	if pingCount < int(testQUICRandomFrames.MinPING) || pingCount >= int(testQUICRandomFrames.MaxPING) {
+		t.Fatalf("PING frame count mismatch: got %d, want [%d, %d)", pingCount, testQUICRandomFrames.MinPING, testQUICRandomFrames.MaxPING)
 	}
 
-	if cryptoCount < 2 || cryptoCount > 8 {
-		t.Fatalf("CRYPTO frame count mismatch: got %d, want 2-8", cryptoCount)
+	if cryptoCount < int(testQUICRandomFrames.MinCRYPTO) || cryptoCount >= int(testQUICRandomFrames.MaxCRYPTO) {
+		t.Fatalf("CRYPTO frame count mismatch: got %d, want [%d, %d)", cryptoCount, testQUICRandomFrames.MinCRYPTO, testQUICRandomFrames.MaxCRYPTO)
+	}
+}
+
+func TestQUICFrameReaderKeepsTrailingFrames(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		kinds   []uint64
+	}{
+		{"ping after padding", []byte{1, 6, 0, 1, 42, 0, 1}, []uint64{1, 6, 0, 1}},
+		{"padding after ping", []byte{1, 6, 0, 1, 42, 1, 0}, []uint64{1, 6, 1, 0}},
+		{"consecutive padding before ping", []byte{1, 6, 0, 1, 42, 0, 0, 1}, []uint64{1, 6, 0, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			frames, err := readQUICFrames(tc.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(frames) != len(tc.kinds) {
+				t.Fatalf("frame count: got %d, want %d", len(frames), len(tc.kinds))
+			}
+			for i, kind := range tc.kinds {
+				if frames[i].FrameType() != kind {
+					t.Fatalf("frame %d: got %d, want %d", i, frames[i].FrameType(), kind)
+				}
+			}
+			data, err := clienthellod.ReassembleCRYPTOFrames(frames)
+			if err != nil || !bytes.Equal(data, []byte{42}) {
+				t.Fatalf("crypto data: got %x, error %v", data, err)
+			}
+		})
 	}
 }
 
@@ -111,10 +140,14 @@ func TestQUICRandomFrames_SmallCryptoNoPanic(t *testing.T) {
 				if err != nil {
 					continue // an error is acceptable; a panic is not
 				}
-				// When it does build, the CRYPTO frames must still reassemble the data.
-				reassembled, rerr := QUICFrames(nil).BuildFromFrames(payload)
-				_ = reassembled
-				_ = rerr
+				frames, parseErr := readQUICFrames(payload)
+				if parseErr != nil {
+					t.Fatalf("parse iteration %d: %v", i, parseErr)
+				}
+				reassembled, reassembleErr := clienthellod.ReassembleCRYPTOFrames(frames)
+				if reassembleErr != nil || !bytes.Equal(reassembled, data) {
+					t.Fatalf("reassemble iteration %d: error %v, got %x, want %x", i, reassembleErr, reassembled, data)
+				}
 			}
 		})
 	}
