@@ -359,7 +359,7 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"test condition changed", "integration.yml", "if: success() || failure()", "if: success()"},
 		{"race disabled", "integration.yml", "race: true", "race: false"},
 		{"32-bit disabled", "integration.yml", "use32bit: true", "use32bit: false"},
-		{"test failure tolerated", "integration.yml", "      - name: Run tools tests\n", "      - name: Run tools tests\n        continue-on-error: true\n"},
+		{"test failure tolerated", "integration.yml", "./integrationtests/tools/...\n", "./integrationtests/tools/...\n        continue-on-error: true\n"},
 		{"duplicate key", "go_build.yml", "name: \"Go Build\"", "name: \"Go Build\"\nname: ignored"},
 		{"multiple documents", "go_build.yml", "name: \"Go Build\"", "name: \"Go Build\"\n---"},
 		{"YAML alias", "go_build.yml", "name: \"Go Build\"", "name: &title \"Go Build\""},
