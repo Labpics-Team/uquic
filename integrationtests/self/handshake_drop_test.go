@@ -186,14 +186,20 @@ func dropCallbackDropNthPacket(direction quicproxy.Direction, n int) quicproxy.D
 }
 
 func dropCallbackDropOneThird(direction quicproxy.Direction) quicproxy.DropCallback {
+	return dropCallbackRandom(direction, mrand.Int63n)
+}
+
+func dropCallbackRandom(direction quicproxy.Direction, random func(int64) int64) quicproxy.DropCallback {
 	const maxSequentiallyDropped = 10
 	var mx sync.Mutex
 	var incoming, outgoing int
 	return func(d quicproxy.Direction, _ []byte) bool {
-		drop := mrand.Int63n(int64(3)) == 0
-
+		if !d.Is(direction) {
+			return false
+		}
 		mx.Lock()
 		defer mx.Unlock()
+		drop := random(3) == 0
 		// never drop more than 10 consecutive packets
 		if d.Is(quicproxy.DirectionIncoming) {
 			if drop {
@@ -227,8 +233,8 @@ func TestHandshakeWithPacketLoss(t *testing.T) {
 	const rtt = 20 * time.Millisecond
 
 	type dropPattern struct {
-		name string
-		fn   quicproxy.DropCallback
+		name    string
+		newDrop func() quicproxy.DropCallback
 	}
 
 	type serverConfig struct {
@@ -238,9 +244,9 @@ func TestHandshakeWithPacketLoss(t *testing.T) {
 
 	for _, direction := range []quicproxy.Direction{quicproxy.DirectionIncoming, quicproxy.DirectionOutgoing, quicproxy.DirectionBoth} {
 		for _, dropPattern := range []dropPattern{
-			{name: "drop 1st packet", fn: dropCallbackDropNthPacket(direction, 1)},
-			{name: "drop 2nd packet", fn: dropCallbackDropNthPacket(direction, 2)},
-			{name: "drop 1/3 of packets", fn: dropCallbackDropOneThird(direction)},
+			{name: "drop 1st packet", newDrop: func() quicproxy.DropCallback { return dropCallbackDropNthPacket(direction, 1) }},
+			{name: "drop 2nd packet", newDrop: func() quicproxy.DropCallback { return dropCallbackDropNthPacket(direction, 2) }},
+			{name: "drop 1/3 of packets", newDrop: func() quicproxy.DropCallback { return dropCallbackDropOneThird(direction) }},
 		} {
 			t.Run(fmt.Sprintf("%s in %s direction", dropPattern.name, direction), func(t *testing.T) {
 				for _, conf := range []serverConfig{
@@ -250,17 +256,17 @@ func TestHandshakeWithPacketLoss(t *testing.T) {
 				} {
 					t.Run(fmt.Sprintf("retry: %t", conf.doRetry), func(t *testing.T) {
 						t.Run("client speaks first", func(t *testing.T) {
-							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.fn, conf.doRetry, conf.longCertChain)
+							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.newDrop(), conf.doRetry, conf.longCertChain)
 							dropTestProtocolClientSpeaksFirst(t, ln, proxyAddr, timeout, data)
 						})
 
 						t.Run("server speaks first", func(t *testing.T) {
-							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.fn, conf.doRetry, conf.longCertChain)
+							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.newDrop(), conf.doRetry, conf.longCertChain)
 							dropTestProtocolServerSpeaksFirst(t, ln, proxyAddr, timeout, data)
 						})
 
 						t.Run("nobody speaks", func(t *testing.T) {
-							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.fn, conf.doRetry, conf.longCertChain)
+							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.newDrop(), conf.doRetry, conf.longCertChain)
 							dropTestProtocolNobodySpeaks(t, ln, proxyAddr, timeout)
 						})
 					})
