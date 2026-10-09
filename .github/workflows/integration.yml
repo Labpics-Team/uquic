@@ -130,32 +130,32 @@ jobs:
     env:
       DEBUG: false
       TIMESCALE_FACTOR: 3
-    name: "Self integration (${{ matrix.os }}, Go ${{ matrix.go }}, ${{ matrix.mode }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
+    name: "Протокольные сценарии (${{ matrix.os }}, Go ${{ matrix.go }}, ${{ matrix.mode }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - name: Set qlogger
+      - name: Настроить qlog
         if: env.DEBUG == 'true'
         run: echo "QLOGFLAG= -qlog" >> $GITHUB_ENV
-      - name: Enable race detector
+      - name: Включить детектор гонок
         if: ${{ matrix.race }}
         run: echo "RACEFLAG= -race" >> $GITHUB_ENV
-      - name: Enable 32-bit build
+      - name: Включить 32-битную сборку
         if: ${{ matrix.use32bit }}
         run: echo "GOARCH=386" >> $GITHUB_ENV
       - run: go version
-      - name: Disable GSO
+      - name: Отключить GSO
         if: matrix.mode == 'gso'
         run: echo "QUIC_GO_DISABLE_GSO=true" >> $GITHUB_ENV
-      - name: Disable ECN
+      - name: Отключить ECN
         if: matrix.mode == 'ecn'
         run: echo "QUIC_GO_DISABLE_ECN=true" >> $GITHUB_ENV
-      - name: Run self tests
+      - name: Проверить протокол
         if: success() || failure()
         run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=${{ matrix.version }} ${{ env.QLOGFLAG }}
-      - name: save qlogs
+      - name: Сохранить qlog
         if: ${{ always() && env.DEBUG == 'true' }}
         uses: actions/upload-artifact@v4
         with:
@@ -200,27 +200,27 @@ jobs:
     env:
       DEBUG: false
       TIMESCALE_FACTOR: 3
-    name: "Integration tools (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
+    name: "Вспомогательные сценарии (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - name: Set qlogger
+      - name: Настроить qlog
         if: env.DEBUG == 'true'
         run: echo "QLOGFLAG= -qlog" >> $GITHUB_ENV
-      - name: Enable race detector
+      - name: Включить детектор гонок
         if: ${{ matrix.race }}
         run: echo "RACEFLAG= -race" >> $GITHUB_ENV
-      - name: Enable 32-bit build
+      - name: Включить 32-битную сборку
         if: ${{ matrix.use32bit }}
         run: echo "GOARCH=386" >> $GITHUB_ENV
       - run: go version
-      - name: Run tools tests
+      - name: Проверить инструменты
         run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/tools/...
-      - name: Run version negotiation tests
+      - name: Проверить согласование версии
         run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/versionnegotiation ${{ env.QLOGFLAG }}
-      - name: save qlogs
+      - name: Сохранить qlog
         if: ${{ always() && env.DEBUG == 'true' }}
         uses: actions/upload-artifact@v4
         with:
@@ -261,25 +261,25 @@ jobs:
     env:
       DEBUG: false
       TIMESCALE_FACTOR: 3
-    name: "Integration benchmarks (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.use32bit && ', 32-bit' || '' }})"
+    name: "Производительность (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.use32bit && ', 32-bit' || '' }})"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - name: Set qlogger
+      - name: Настроить qlog
         if: env.DEBUG == 'true'
         run: echo "QLOGFLAG= -qlog" >> $GITHUB_ENV
-      - name: Enable race detector
+      - name: Включить детектор гонок
         if: ${{ matrix.race }}
         run: echo "RACEFLAG= -race" >> $GITHUB_ENV
-      - name: Enable 32-bit build
+      - name: Включить 32-битную сборку
         if: ${{ matrix.use32bit }}
         run: echo "GOARCH=386" >> $GITHUB_ENV
       - run: go version
-      - name: Run benchmarks
+      - name: Измерить производительность
         run: go test -v -run=^$ -timeout 5m -shuffle=on -bench=. ./integrationtests/self
-      - name: save qlogs
+      - name: Сохранить qlog
         if: ${{ always() && env.DEBUG == 'true' }}
         uses: actions/upload-artifact@v4
         with:
@@ -288,13 +288,13 @@ jobs:
           retention-days: 7
 
   gate:
-    name: Integration complete
+    name: Интеграционные проверки
     needs: [integration, ancillary, benchmarks]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every integration matrix
+      - name: Проверить все матрицы
         shell: bash
         env:
           SELF: ${{ needs.integration.result }}
