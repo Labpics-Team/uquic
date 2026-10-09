@@ -87,6 +87,9 @@ func parse(raw []byte) (map[string]any, error) {
 //go:embed testdata/native-jobs.yml
 var nativeJobsYAML []byte
 
+//go:embed testdata/integration-matrix-jobs.yml
+var integrationMatrixJobsYAML []byte
+
 func validate(files map[string][]byte) error {
 	if len(files) != 3 {
 		return fmt.Errorf("expected exactly the three native workflows")
@@ -146,6 +149,18 @@ func validate(files map[string][]byte) error {
 		case "integration.yml":
 			metadata["name"] = "Integration"
 			metadata["on"] = map[string]any{"workflow_call": nil}
+
+			integrationJobs, err := parse(integrationMatrixJobsYAML)
+			if err != nil {
+				return fmt.Errorf("invalid integration matrix job fixture: %w", err)
+			}
+			if len(integrationJobs) != 4 {
+				return fmt.Errorf("expected exactly four integration matrix job fixtures, got %d", len(integrationJobs))
+			}
+			expectedJobs = integrationJobs
+			if err := validateIntegrationUnion(jobs); err != nil {
+				return fmt.Errorf("integration matrix union: %w", err)
+			}
 		}
 		if !reflect.DeepEqual(workflow, metadata) {
 			return fmt.Errorf("%s: triggers, permissions or concurrency changed", file)
@@ -308,6 +323,13 @@ func TestGateResults(t *testing.T) {
 
 func TestContractRejectsMutations(t *testing.T) {
 	mutations := []struct{ name, file, before, after string }{
+		{"integration gate skips failure", "integration.yml", "    if: ${{ always() }}", "    if: ${{ success() }}"},
+		{"integration gate misses benchmarks", "integration.yml", "needs: [integration, ancillary, benchmarks]", "needs: [integration, ancillary]"},
+		{"integration gate constant binding", "integration.yml", "SELF: ${{ needs.integration.result }}", "SELF: success"},
+		{"integration gate ignores benchmarks", "integration.yml", "test \"$BENCHMARKS\" = success", "true"},
+		{"integration matrix fail-fast", "integration.yml", "fail-fast: false", "fail-fast: true"},
+		{"self GSO environment removed", "integration.yml", "echo \"QUIC_GO_DISABLE_GSO=true\"", "echo \"QUIC_GO_DISABLE_GSO=false\""},
+		{"self ECN environment removed", "integration.yml", "echo \"QUIC_GO_DISABLE_ECN=true\"", "echo \"QUIC_GO_DISABLE_ECN=false\""},
 		{"PR filter", "go_build.yml", "  pull_request:", "  pull_request:\n    paths: ['*.go']"},
 		{"merge group removed", "go_build.yml", "  merge_group:\n", ""},
 		{"shared non-PR concurrency", "go_build.yml", "github.run_id", "github.ref"},
@@ -337,7 +359,7 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"test condition changed", "integration.yml", "if: success() || failure()", "if: success()"},
 		{"race disabled", "integration.yml", "race: true", "race: false"},
 		{"32-bit disabled", "integration.yml", "use32bit: true", "use32bit: false"},
-		{"test failure tolerated", "integration.yml", "      - name: Run tools tests\n", "      - name: Run tools tests\n        continue-on-error: true\n"},
+		{"test failure tolerated", "integration.yml", "./integrationtests/tools/...\n", "./integrationtests/tools/...\n        continue-on-error: true\n"},
 		{"duplicate key", "go_build.yml", "name: \"Go Build\"", "name: \"Go Build\"\nname: ignored"},
 		{"multiple documents", "go_build.yml", "name: \"Go Build\"", "name: \"Go Build\"\n---"},
 		{"YAML alias", "go_build.yml", "name: \"Go Build\"", "name: &title \"Go Build\""},
@@ -371,4 +393,257 @@ func TestContractRejectsMutations(t *testing.T) {
 			t.Fatal("missing worker accepted")
 		}
 	})
+}
+
+// Полные пакеты не делятся по функциям. Независимый набор ниже фиксирует все
+// исходные 18 self-вариантов, шесть вспомогательных пар и пять benchmark-запусков.
+func integrationMatrixSet(jobs map[string]any, name string, fields []string) (map[string]bool, error) {
+	job, ok := jobs[name].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: missing matrix job", name)
+	}
+	strategy, ok := job["strategy"].(map[string]any)
+	if !ok || strategy["fail-fast"] != false {
+		return nil, fmt.Errorf("%s: fail-fast must remain false", name)
+	}
+	matrix, ok := strategy["matrix"].(map[string]any)
+	if !ok || len(matrix) != 1 {
+		return nil, fmt.Errorf("%s: expected only explicit include rows", name)
+	}
+	rows, ok := matrix["include"].([]any)
+	if !ok || len(rows) == 0 {
+		return nil, fmt.Errorf("%s: missing include rows", name)
+	}
+	result := make(map[string]bool)
+	for _, value := range rows {
+		row, ok := value.(map[string]any)
+		if !ok || len(row) != len(fields) {
+			return nil, fmt.Errorf("%s: incomplete or extra row fields", name)
+		}
+		tuple := make([]string, 0, len(fields))
+		for _, field := range fields {
+			switch field {
+			case "race", "use32bit":
+				value, ok := row[field].(bool)
+				if !ok {
+					return nil, fmt.Errorf("%s: %s must be boolean", name, field)
+				}
+				tuple = append(tuple, fmt.Sprint(value))
+			case "version":
+				value, ok := row[field].(int)
+				if !ok {
+					return nil, fmt.Errorf("%s: version must be an integer", name)
+				}
+				tuple = append(tuple, fmt.Sprint(value))
+			default:
+				value, ok := row[field].(string)
+				if !ok || value == "" {
+					return nil, fmt.Errorf("%s: %s must be a nonempty string", name, field)
+				}
+				tuple = append(tuple, value)
+			}
+		}
+		key := strings.Join(tuple, "|")
+		if result[key] {
+			return nil, fmt.Errorf("%s: duplicate case %s", name, key)
+		}
+		result[key] = true
+	}
+	return result, nil
+}
+
+func integrationCaseSet(keys ...string) map[string]bool {
+	result := make(map[string]bool)
+	for _, key := range keys {
+		result[key] = true
+	}
+	return result
+}
+
+func validateIntegrationUnion(jobs map[string]any) error {
+	policies := []struct {
+		name     string
+		fields   []string
+		cases    map[string]bool
+		commands []string
+	}{
+		{
+			"integration",
+			[]string{"os", "go", "race", "use32bit", "mode", "version"},
+			integrationCaseSet(
+				"ubuntu|1.23.x|false|false|v1|1",
+				"ubuntu|1.23.x|false|false|v2|2",
+				"ubuntu|1.23.x|false|false|gso|1",
+				"ubuntu|1.23.x|false|false|ecn|1",
+				"ubuntu|1.24.x|false|false|v1|1",
+				"ubuntu|1.24.x|false|false|v2|2",
+				"ubuntu|1.24.x|false|false|gso|1",
+				"ubuntu|1.24.x|false|false|ecn|1",
+				"ubuntu|1.24.x|true|false|v1|1",
+				"ubuntu|1.24.x|true|false|gso|1",
+				"ubuntu|1.24.x|false|true|v1|1",
+				"ubuntu|1.24.x|false|true|v2|2",
+				"ubuntu|1.24.x|false|true|gso|1",
+				"ubuntu|1.24.x|false|true|ecn|1",
+				"windows|1.24.x|false|false|v1|1",
+				"windows|1.24.x|false|false|v2|2",
+				"macos|1.24.x|false|false|v1|1",
+				"macos|1.24.x|false|false|v2|2",
+			),
+			[]string{"go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=${{ matrix.version }} ${{ env.QLOGFLAG }}"},
+		},
+		{
+			"ancillary",
+			[]string{"os", "go", "race", "use32bit"},
+			integrationCaseSet(
+				"ubuntu|1.23.x|false|false",
+				"ubuntu|1.24.x|false|false",
+				"ubuntu|1.24.x|true|false",
+				"ubuntu|1.24.x|false|true",
+				"windows|1.24.x|false|false",
+				"macos|1.24.x|false|false",
+			),
+			[]string{"go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/tools/...", "go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/versionnegotiation ${{ env.QLOGFLAG }}"},
+		},
+		{
+			"benchmarks",
+			[]string{"os", "go", "race", "use32bit"},
+			integrationCaseSet(
+				"ubuntu|1.23.x|false|false",
+				"ubuntu|1.24.x|false|false",
+				"ubuntu|1.24.x|false|true",
+				"windows|1.24.x|false|false",
+				"macos|1.24.x|false|false",
+			),
+			[]string{"go test -v -run=^$ -timeout 5m -shuffle=on -bench=. ./integrationtests/self"},
+		},
+	}
+	for _, policy := range policies {
+		got, err := integrationMatrixSet(jobs, policy.name, policy.fields)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(got, policy.cases) {
+			return fmt.Errorf("%s: complete invocation union changed", policy.name)
+		}
+		job := jobs[policy.name].(map[string]any)
+		if !reflect.DeepEqual(job["env"], map[string]any{"DEBUG": false, "TIMESCALE_FACTOR": 3}) {
+			return fmt.Errorf("%s: integration timing or qlog environment changed", policy.name)
+		}
+		steps, ok := job["steps"].([]any)
+		if !ok {
+			return fmt.Errorf("%s: missing steps", policy.name)
+		}
+		var commands []string
+		for _, value := range steps {
+			step, ok := value.(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s: invalid step", policy.name)
+			}
+			if command, ok := step["run"].(string); ok && strings.HasPrefix(command, "go test ") {
+				commands = append(commands, command)
+			}
+		}
+		if !reflect.DeepEqual(commands, policy.commands) {
+			return fmt.Errorf("%s: complete package command changed", policy.name)
+		}
+	}
+	return nil
+}
+
+func TestIntegrationUnionRejectsMissingAndRepeatedCases(t *testing.T) {
+	for _, name := range []string{"integration", "ancillary", "benchmarks"} {
+		for _, mutation := range []string{"missing", "duplicate", "unknown row", "extra axis", "timing", "selector"} {
+			t.Run(name+"/"+mutation, func(t *testing.T) {
+				workflow, err := parse(workflows(t)["integration.yml"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				jobs := workflow["jobs"].(map[string]any)
+				if err := validateIntegrationUnion(jobs); err != nil {
+					t.Fatal(err)
+				}
+				job := jobs[name].(map[string]any)
+				matrix := job["strategy"].(map[string]any)["matrix"].(map[string]any)
+				rows := matrix["include"].([]any)
+				switch mutation {
+				case "missing":
+					matrix["include"] = rows[1:]
+				case "duplicate":
+					matrix["include"] = append(rows, rows[0])
+				case "unknown row":
+					rows[0].(map[string]any)["go"] = "unknown"
+				case "extra axis":
+					matrix["skip"] = []any{false, true}
+				case "timing":
+					job["env"].(map[string]any)["TIMESCALE_FACTOR"] = 1
+				case "selector":
+					for _, value := range job["steps"].([]any) {
+						step := value.(map[string]any)
+						if command, ok := step["run"].(string); ok && strings.HasPrefix(command, "go test ") {
+							step["run"] = command + " -short"
+							break
+						}
+					}
+				}
+				if validateIntegrationUnion(jobs) == nil {
+					t.Fatal("independent integration union accepted mutation")
+				}
+			})
+		}
+	}
+}
+
+func TestIntegrationGateResults(t *testing.T) {
+	workflow, err := parse(workflows(t)["integration.yml"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := workflow["jobs"].(map[string]any)["gate"].(map[string]any)
+	script := gate["steps"].([]any)[0].(map[string]any)["run"].(string)
+	bash, err := gateBash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"SELF", "ANCILLARY", "BENCHMARKS"}
+	check := func(t *testing.T, results map[string]string, wantSuccess bool) {
+		t.Helper()
+		cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
+		for _, entry := range os.Environ() {
+			key, _, _ := strings.Cut(entry, "=")
+			if key != "SELF" && key != "ANCILLARY" && key != "BENCHMARKS" {
+				cmd.Env = append(cmd.Env, entry)
+			}
+		}
+		for key, value := range results {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); !ok {
+				t.Fatalf("bash unavailable: %v", err)
+			}
+		}
+		if (err == nil) != wantSuccess {
+			t.Fatalf("results=%v: err=%v output=%s", results, err, out)
+		}
+	}
+	all := func() map[string]string {
+		return map[string]string{"SELF": "success", "ANCILLARY": "success", "BENCHMARKS": "success"}
+	}
+	t.Run("all success", func(t *testing.T) { check(t, all(), true) })
+	for _, key := range keys {
+		for _, result := range []string{"failure", "cancelled", "skipped", "neutral", "", "unknown", "missing"} {
+			t.Run(key+"/"+result, func(t *testing.T) {
+				results := all()
+				if result == "missing" {
+					delete(results, key)
+				} else {
+					results[key] = result
+				}
+				check(t, results, false)
+			})
+		}
+	}
+	t.Run("empty", func(t *testing.T) { check(t, map[string]string{}, false) })
 }

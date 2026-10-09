@@ -91,8 +91,7 @@ func (qfs QUICFrames) Build(cryptoData []byte) (payload []byte, err error) {
 // of all frames as specified in the slice.
 func (qfs QUICFrames) BuildFromFrames(frames []byte) (payload []byte, err error) {
 	// parse frames
-	r := bytes.NewReader(frames)
-	qchframes, err := clienthellod.ReadAllFrames(r)
+	qchframes, err := readQUICFrames(frames)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +104,11 @@ func (qfs QUICFrames) BuildFromFrames(frames []byte) (payload []byte, err error)
 
 	// marshal
 	return qfs.Build(cryptoData)
+}
+
+// Пустое чтение буфера не возвращает EOF после байта, возвращённого парсером.
+func readQUICFrames(payload []byte) ([]clienthellod.QUICFrame, error) {
+	return clienthellod.ReadAllFrames(bytes.NewBuffer(payload))
 }
 
 // QUICFrame is the interface for all QUIC frames to be included in the Initial Packet.
