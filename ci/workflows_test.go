@@ -2,6 +2,7 @@ package ci
 
 import (
 	_ "embed"
+	"crypto/sha1"
 	"fmt"
 	"io"
 	"os"
@@ -51,6 +52,11 @@ steps:
         "https://github.com/aquasecurity/trivy/releases/download/v$version/trivy_${version}_Linux-64bit.tar.gz"
       echo "$sum  $dir/trivy.tgz" | sha256sum -c -
       tar -xzf "$dir/trivy.tgz" -C "$dir" trivy
+      # Only the exact tracked test key may use the private-key exception.
+      if [ "$(git hash-object internal/testdata/priv.key)" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then
+        echo "accepted test key differs from its reviewed fixture" >&2
+        exit 1
+      fi
       accepted=(--ignorefile /dev/null)
       [ -f .trivyignore.yaml ] && accepted=(--ignorefile .trivyignore.yaml)
       # Настройки сканера задаёт шаг: trivy.yaml из проверяемого дерева их не меняет.
@@ -75,14 +81,19 @@ steps:
   - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
     with:
       go-version: '1.26.x'
+  # Платформы со своим кодом (linux, darwin, freebsd, windows, прочие — на примере openbsd)
+  # и 32-битная сборка из CI, с cgo и без.
   - name: Проверить отсутствие golang.org/x/crypto/openpgp
     run: |
       set -euo pipefail
+      dependencies="$(mktemp)"
+      trap 'rm -f "$dependencies"' EXIT
       for target in linux-amd64 linux-386 linux-arm64 darwin-amd64 darwin-arm64 freebsd-amd64 windows-amd64 windows-arm64 openbsd-amd64; do
         for cgo in 0 1; do
-          GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./...
+          GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./... >> "$dependencies"
         done
-      done | awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }'
+      done
+      awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
 `
 
 const gateJob = `
@@ -396,6 +407,26 @@ func TestGateResults(t *testing.T) {
 	t.Run("empty", func(t *testing.T) { check(t, map[string]string{}, false) })
 }
 
+func TestAcceptedKeyMatchesReviewedBlob(t *testing.T) {
+	fixture, err := os.ReadFile("../internal/testdata/priv.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := func(data []byte) string {
+		h := sha1.New()
+		fmt.Fprintf(h, "blob %d\\x00", len(data))
+		h.Write(data)
+		return fmt.Sprintf("%x", h.Sum(nil))
+	}
+	const reviewedBlob = "56b8d894dc12c146ff16e176a942b7dc44aa4562"
+	if got := hash(fixture); got != reviewedBlob {
+		t.Fatalf("test key fixture changed: %s", got)
+	}
+	if got := hash(append(append([]byte(nil), fixture...), 'x')); got == reviewedBlob {
+		t.Fatal("modified test fixture would pass the allowed key check")
+	}
+}
+
 func TestContractRejectsMutations(t *testing.T) {
 	mutations := []struct{ name, file, before, after string }{
 		{"integration gate skips failure", "integration.yml", "    if: ${{ always() }}", "    if: ${{ success() }}"},
@@ -416,6 +447,8 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"gate ignores security", "go_build.yml", "test \"$SECURITY\" = success", "true"},
 		{"gate ignores openpgp", "go_build.yml", "test \"$OPENPGP\" = success", "true"},
 		{"security scan disabled", "go_build.yml", "  security:\n", "  security:\n    if: false\n"},
+		{"accepted key check removed", "go_build.yml", "          if [ \"$(git hash-object internal/testdata/priv.key)\" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then\n", ""},
+		{"openpgp go list errors ignored", "go_build.yml", "go list -deps -test ./... >> \"$dependencies\"", "go list -deps -test ./... >> \"$dependencies\" || true"},
 		{"security scan tolerates failure", "go_build.yml", "  security:\n", "  security:\n    continue-on-error: true\n"},
 		{"scanner checksum changed", "go_build.yml", "sum=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a", "sum=$(curl -fsSL \"$url.sha256\")"},
 		{"accepted findings mask a released fix", "go_build.yml", "--ignore-unfixed --ignorefile /dev/null", "--ignore-unfixed \"${accepted[@]}\""},
