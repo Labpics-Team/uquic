@@ -4,109 +4,109 @@ integration:
     matrix:
       include:
         - os: "ubuntu"
-          go: "1.23.x"
+          go: "1.26.0"
           race: false
           use32bit: false
           mode: "v1"
           version: 1
         - os: "ubuntu"
-          go: "1.23.x"
+          go: "1.26.0"
           race: false
           use32bit: false
           mode: "v2"
           version: 2
         - os: "ubuntu"
-          go: "1.23.x"
+          go: "1.26.0"
           race: false
           use32bit: false
           mode: "gso"
           version: 1
         - os: "ubuntu"
-          go: "1.23.x"
+          go: "1.26.0"
           race: false
           use32bit: false
           mode: "ecn"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "v1"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "v2"
           version: 2
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "gso"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "ecn"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: true
           use32bit: false
           mode: "v1"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: true
           use32bit: false
           mode: "gso"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: true
           mode: "v1"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: true
           mode: "v2"
           version: 2
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: true
           mode: "gso"
           version: 1
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: true
           mode: "ecn"
           version: 1
         - os: "windows"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "v1"
           version: 1
         - os: "windows"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "v2"
           version: 2
         - os: "macos"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "v1"
           version: 1
         - os: "macos"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
           mode: "v2"
@@ -158,27 +158,27 @@ ancillary:
     matrix:
       include:
         - os: "ubuntu"
-          go: "1.23.x"
+          go: "1.26.0"
           race: false
           use32bit: false
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: true
           use32bit: false
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: true
         - os: "windows"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
         - os: "macos"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
   runs-on: ${{ format('{0}-latest', matrix.os) }}
@@ -223,23 +223,23 @@ benchmarks:
     matrix:
       include:
         - os: "ubuntu"
-          go: "1.23.x"
+          go: "1.26.0"
           race: false
           use32bit: false
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
         - os: "ubuntu"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: true
         - os: "windows"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
         - os: "macos"
-          go: "1.24.x"
+          go: "1.26.x"
           race: false
           use32bit: false
   runs-on: ${{ format('{0}-latest', matrix.os) }}

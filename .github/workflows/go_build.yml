@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
-        go: [ "1.21.x", "1.22.x" ]
+        go: [ "1.26.0", "1.26.x" ]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
@@ -39,8 +39,88 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: '1.24.x'
+          go-version: '1.26.x'
       - run: go test -count=1 ./ci
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Scan dependencies, configuration and secrets
+        run: |
+          set -euo pipefail
+          # trivy читает переменные TRIVY_* как флаги: охват проверки задаёт только этот шаг.
+          unset "${!TRIVY_@}"
+          version=0.74.0
+          sum=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+          dir="$RUNNER_TEMP/trivy"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 --retry-all-errors -o "$dir/trivy.tgz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v$version/trivy_${version}_Linux-64bit.tar.gz"
+          echo "$sum  $dir/trivy.tgz" | sha256sum -c -
+          tar -xzf "$dir/trivy.tgz" -C "$dir" trivy
+          # Only the exact tracked test key may use the private-key exception.
+          if [ "$(git hash-object internal/testdata/priv.key)" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then
+            echo "accepted test key differs from its reviewed fixture" >&2
+            exit 1
+          fi
+          accepted=(--ignorefile /dev/null)
+          [ -f .trivyignore.yaml ] && accepted=(--ignorefile .trivyignore.yaml)
+          # Настройки сканера задаёт шаг: trivy.yaml из проверяемого дерева их не меняет.
+          scan() { "$dir/trivy" fs --config /dev/null --cache-dir "$dir/cache" --exit-code 1 --no-progress "$@" .; }
+          scan --scanners vuln,misconfig --severity UNKNOWN,HIGH,CRITICAL --include-dev-deps "${accepted[@]}"
+          # Исправление вышло — принятая раньше уязвимость снова блокирует.
+          scan --scanners vuln --severity UNKNOWN,HIGH,CRITICAL --include-dev-deps --ignore-unfixed --ignorefile /dev/null
+          # Секрет в тестах, примерах и документации — такая же утечка: встроенные исключения trivy для них сняты.
+          printf 'disable-allow-rules:\n  - tests\n  - examples\n  - markdown\n' > "$dir/secret.yaml"
+          scan --scanners secret --secret-config "$dir/secret.yaml" "${accepted[@]}"
+          # Prove that the secret scanner actually recognizes keys in tests and Markdown.
+          probe="$dir/secret-probe"
+          mkdir -p "$probe/tests" "$probe/docs"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$probe/docs/probe.md" 2>/dev/null
+          cp "$probe/docs/probe.md" "$probe/tests/probe_test.go"
+          if "$dir/trivy" fs --config /dev/null --cache-dir "$dir/cache" --exit-code 1 --no-progress --scanners secret --secret-config "$dir/secret.yaml" --ignorefile /dev/null --format json --output "$dir/probe-results.json" "$probe"; then
+            echo "synthetic private keys were not rejected" >&2
+            exit 1
+          fi
+          python3 - "$dir/probe-results.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          found = {result.get("Target", "") for result in report.get("Results", [])
+                   if any(s.get("RuleID") == "private-key" for s in result.get("Secrets") or [])}
+          for name in ("docs/probe.md", "tests/probe_test.go"):
+              if not any(name in target for target in found):
+                  raise SystemExit(f"missing private-key detection in {name}")
+          PY
+
+  openpgp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.x'
+      # Платформы со своим кодом (linux, darwin, freebsd, windows, прочие — на примере openbsd)
+      # и 32-битная сборка из CI, с cgo и без.
+      - name: Проверить отсутствие golang.org/x/crypto/openpgp
+        run: |
+          set -euo pipefail
+          dependencies="$(mktemp)"
+          trap 'rm -f "$dependencies"' EXIT
+          for target in linux-amd64 linux-386 linux-arm64 darwin-amd64 darwin-arm64 freebsd-amd64 windows-amd64 windows-arm64 openbsd-amd64; do
+            for cgo in 0 1; do
+              GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./... >> "$dependencies"
+            done
+          done
+          awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
 
   ginkgo:
     uses: ./.github/workflows/ginkgo_test.yml
@@ -50,7 +130,7 @@ jobs:
 
   gate:
     name: CI
-    needs: [contract, build, ginkgo, integration]
+    needs: [contract, build, ginkgo, integration, security, openpgp]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -62,8 +142,12 @@ jobs:
           BUILD: ${{ needs.build.result }}
           GINKGO: ${{ needs.ginkgo.result }}
           INTEGRATION: ${{ needs.integration.result }}
+          SECURITY: ${{ needs.security.result }}
+          OPENPGP: ${{ needs.openpgp.result }}
         run: |
           test "$CONTRACT" = success
           test "$BUILD" = success
           test "$GINKGO" = success
           test "$INTEGRATION" = success
+          test "$SECURITY" = success
+          test "$OPENPGP" = success

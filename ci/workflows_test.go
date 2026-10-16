@@ -2,6 +2,7 @@ package ci
 
 import (
 	_ "embed"
+	"crypto/sha1"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,13 +26,99 @@ steps:
       persist-credentials: false
   - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
     with:
-      go-version: '1.24.x'
+      go-version: '1.26.x'
   - run: go test -count=1 ./ci
+`
+
+// Скан trivy блокирует уязвимые зависимости, ошибки конфигурации и секреты; принятые находки
+// перечислены в .trivyignore.yaml.
+const securityJob = `
+runs-on: ubuntu-latest
+timeout-minutes: 15
+steps:
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    with:
+      persist-credentials: false
+  - name: Scan dependencies, configuration and secrets
+    run: |
+      set -euo pipefail
+      # trivy читает переменные TRIVY_* как флаги: охват проверки задаёт только этот шаг.
+      unset "${!TRIVY_@}"
+      version=0.74.0
+      sum=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+      dir="$RUNNER_TEMP/trivy"
+      mkdir -p "$dir"
+      curl -fsSL --retry 3 --retry-all-errors -o "$dir/trivy.tgz" \
+        "https://github.com/aquasecurity/trivy/releases/download/v$version/trivy_${version}_Linux-64bit.tar.gz"
+      echo "$sum  $dir/trivy.tgz" | sha256sum -c -
+      tar -xzf "$dir/trivy.tgz" -C "$dir" trivy
+      # Only the exact tracked test key may use the private-key exception.
+      if [ "$(git hash-object internal/testdata/priv.key)" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then
+        echo "accepted test key differs from its reviewed fixture" >&2
+        exit 1
+      fi
+      accepted=(--ignorefile /dev/null)
+      [ -f .trivyignore.yaml ] && accepted=(--ignorefile .trivyignore.yaml)
+      # Настройки сканера задаёт шаг: trivy.yaml из проверяемого дерева их не меняет.
+      scan() { "$dir/trivy" fs --config /dev/null --cache-dir "$dir/cache" --exit-code 1 --no-progress "$@" .; }
+      scan --scanners vuln,misconfig --severity UNKNOWN,HIGH,CRITICAL --include-dev-deps "${accepted[@]}"
+      # Исправление вышло — принятая раньше уязвимость снова блокирует.
+      scan --scanners vuln --severity UNKNOWN,HIGH,CRITICAL --include-dev-deps --ignore-unfixed --ignorefile /dev/null
+      # Секрет в тестах, примерах и документации — такая же утечка: встроенные исключения trivy для них сняты.
+      printf 'disable-allow-rules:\n  - tests\n  - examples\n  - markdown\n' > "$dir/secret.yaml"
+      scan --scanners secret --secret-config "$dir/secret.yaml" "${accepted[@]}"
+      # Prove that the secret scanner actually recognizes keys in tests and Markdown.
+      probe="$dir/secret-probe"
+      mkdir -p "$probe/tests" "$probe/docs"
+      openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$probe/docs/probe.md" 2>/dev/null
+      cp "$probe/docs/probe.md" "$probe/tests/probe_test.go"
+      if "$dir/trivy" fs --config /dev/null --cache-dir "$dir/cache" --exit-code 1 --no-progress --scanners secret --secret-config "$dir/secret.yaml" --ignorefile /dev/null --format json --output "$dir/probe-results.json" "$probe"; then
+        echo "synthetic private keys were not rejected" >&2
+        exit 1
+      fi
+      python3 - "$dir/probe-results.json" <<'PY'
+      import json
+      import sys
+      with open(sys.argv[1], encoding="utf-8") as stream:
+          report = json.load(stream)
+      found = {result.get("Target", "") for result in report.get("Results", [])
+               if any(s.get("RuleID") == "private-key" for s in result.get("Secrets") or [])}
+      for name in ("docs/probe.md", "tests/probe_test.go"):
+          if not any(name in target for target in found):
+              raise SystemExit(f"missing private-key detection in {name}")
+      PY
+`
+
+// Принятие GO-2026-5932 в .trivyignore.yaml держится, пока openpgp нет в графе зависимостей
+// ни одной проверяемой платформы.
+const openpgpJob = `
+runs-on: ubuntu-latest
+timeout-minutes: 10
+steps:
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    with:
+      persist-credentials: false
+  - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+    with:
+      go-version: '1.26.x'
+  # Платформы со своим кодом (linux, darwin, freebsd, windows, прочие — на примере openbsd)
+  # и 32-битная сборка из CI, с cgo и без.
+  - name: Проверить отсутствие golang.org/x/crypto/openpgp
+    run: |
+      set -euo pipefail
+      dependencies="$(mktemp)"
+      trap 'rm -f "$dependencies"' EXIT
+      for target in linux-amd64 linux-386 linux-arm64 darwin-amd64 darwin-arm64 freebsd-amd64 windows-amd64 windows-arm64 openbsd-amd64; do
+        for cgo in 0 1; do
+          GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./... >> "$dependencies"
+        done
+      done
+      awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
 `
 
 const gateJob = `
 name: CI
-needs: [contract, build, ginkgo, integration]
+needs: [contract, build, ginkgo, integration, security, openpgp]
 if: ${{ always() }}
 runs-on: ubuntu-latest
 timeout-minutes: 5
@@ -42,11 +130,15 @@ steps:
       BUILD: ${{ needs.build.result }}
       GINKGO: ${{ needs.ginkgo.result }}
       INTEGRATION: ${{ needs.integration.result }}
+      SECURITY: ${{ needs.security.result }}
+      OPENPGP: ${{ needs.openpgp.result }}
     run: |
       test "$CONTRACT" = success
       test "$BUILD" = success
       test "$GINKGO" = success
       test "$INTEGRATION" = success
+      test "$SECURITY" = success
+      test "$OPENPGP" = success
 `
 
 func parse(raw []byte) (map[string]any, error) {
@@ -135,11 +227,21 @@ func validate(files map[string][]byte) error {
 			if err != nil {
 				return fmt.Errorf("invalid contract job fixture: %w", err)
 			}
+			security, err := parse([]byte(securityJob))
+			if err != nil {
+				return fmt.Errorf("invalid security job fixture: %w", err)
+			}
+			openpgp, err := parse([]byte(openpgpJob))
+			if err != nil {
+				return fmt.Errorf("invalid openpgp job fixture: %w", err)
+			}
 			gate, err := parse([]byte(gateJob))
 			if err != nil {
 				return fmt.Errorf("invalid gate job fixture: %w", err)
 			}
 			expectedJobs["contract"] = contract
+			expectedJobs["security"] = security
+			expectedJobs["openpgp"] = openpgp
 			expectedJobs["gate"] = gate
 			expectedJobs["ginkgo"] = map[string]any{"uses": "./.github/workflows/ginkgo_test.yml"}
 			expectedJobs["integration"] = map[string]any{"uses": "./.github/workflows/integration.yml"}
@@ -278,13 +380,13 @@ func TestGateResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{"CONTRACT", "BUILD", "GINKGO", "INTEGRATION"}
+	keys := []string{"CONTRACT", "BUILD", "GINKGO", "INTEGRATION", "SECURITY", "OPENPGP"}
 	check := func(t *testing.T, results map[string]string, wantSuccess bool) {
 		t.Helper()
 		cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
 		for _, entry := range os.Environ() {
 			key, _, _ := strings.Cut(entry, "=")
-			if key != "CONTRACT" && key != "BUILD" && key != "GINKGO" && key != "INTEGRATION" {
+			if !slices.Contains(keys, key) {
 				cmd.Env = append(cmd.Env, entry)
 			}
 		}
@@ -302,7 +404,11 @@ func TestGateResults(t *testing.T) {
 		}
 	}
 	all := func() map[string]string {
-		return map[string]string{"CONTRACT": "success", "BUILD": "success", "GINKGO": "success", "INTEGRATION": "success"}
+		results := make(map[string]string)
+		for _, key := range keys {
+			results[key] = "success"
+		}
+		return results
 	}
 	t.Run("all success", func(t *testing.T) { check(t, all(), true) })
 	for _, key := range keys {
@@ -321,6 +427,65 @@ func TestGateResults(t *testing.T) {
 	t.Run("empty", func(t *testing.T) { check(t, map[string]string{}, false) })
 }
 
+func TestAcceptedKeyMatchesReviewedBlob(t *testing.T) {
+	fixture, err := os.ReadFile("../internal/testdata/priv.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := func(data []byte) string {
+		h := sha1.New()
+		fmt.Fprintf(h, "blob %d%c", len(data), 0)
+		h.Write(data)
+		return fmt.Sprintf("%x", h.Sum(nil))
+	}
+	const reviewedBlob = "56b8d894dc12c146ff16e176a942b7dc44aa4562"
+	if got := hash(fixture); got != reviewedBlob {
+		t.Fatalf("test key fixture changed: %s", got)
+	}
+	if got := hash(append(append([]byte(nil), fixture...), 'x')); got == reviewedBlob {
+		t.Fatal("modified test fixture would pass the allowed key check")
+	}
+}
+
+func TestOpenPGPRejectsForbiddenOrUnresolvedGraph(t *testing.T) {
+	files := workflows(t)
+	w, err := parse(files["go_build.yml"])
+	if err != nil { t.Fatal(err) }
+	job := w["jobs"].(map[string]any)["openpgp"].(map[string]any)
+	steps := job["steps"].([]any)
+	script := steps[len(steps)-1].(map[string]any)["run"].(string)
+	bash, err := gateBash()
+	if err != nil { t.Fatal(err) }
+	const stub = `go() {
+	  if [ "$GOOS-$GOARCH-$CGO_ENABLED" = "$PROBE_TARGET" ]; then
+	    case "$PROBE_MODE" in
+	      forbidden) echo golang.org/x/crypto/openpgp/armor; return 0 ;;
+	      fail) return 17 ;;
+	    esac
+	  fi
+	  echo fmt
+	}`
+	check := func(target, mode string, success bool) {
+		t.Helper()
+		cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", stub+"\n"+script)
+		cmd.Env = append(os.Environ(), "PROBE_TARGET="+target, "PROBE_MODE="+mode)
+		out, err := cmd.CombinedOutput()
+		if (err == nil) != success { t.Fatalf("target=%s mode=%s: err=%v, output=%s", target, mode, err, out) }
+	}
+	check("", "", true)
+	parts := strings.SplitN(script, "for target in ", 2)
+	if len(parts) != 2 { t.Fatal("no platform matrix") }
+	targets := strings.Fields(strings.SplitN(parts[1], "; do", 2)[0])
+	if len(targets) < 2 { t.Fatal("missing multi-platform coverage") }
+	for _, target := range targets {
+		for _, cgo := range []string{"0", "1"} {
+			key := target+"-"+cgo
+			t.Run(key+"/forbidden", func(t *testing.T) { check(key, "forbidden", false) })
+			t.Run(key+"/failed-go-list", func(t *testing.T) { check(key, "fail", false) })
+		}
+	}
+}
+
 func TestContractRejectsMutations(t *testing.T) {
 	mutations := []struct{ name, file, before, after string }{
 		{"integration gate skips failure", "integration.yml", "    if: ${{ always() }}", "    if: ${{ success() }}"},
@@ -334,8 +499,25 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"merge group removed", "go_build.yml", "  merge_group:\n", ""},
 		{"shared non-PR concurrency", "go_build.yml", "github.run_id", "github.ref"},
 		{"gate skips failures", "go_build.yml", "${{ always() }}", "${{ success() }}"},
-		{"gate misses integration", "go_build.yml", "needs: [contract, build, ginkgo, integration]", "needs: [contract, build, ginkgo]"},
+		{"gate misses integration", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp]", "needs: [contract, build, ginkgo, security, openpgp]"},
+		{"gate misses security", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp]", "needs: [contract, build, ginkgo, integration, openpgp]"},
+		{"gate misses openpgp", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp]", "needs: [contract, build, ginkgo, integration, security]"},
 		{"gate unconditional success", "go_build.yml", "test \"$INTEGRATION\" = success", "true"},
+		{"gate ignores security", "go_build.yml", "test \"$SECURITY\" = success", "true"},
+		{"gate ignores openpgp", "go_build.yml", "test \"$OPENPGP\" = success", "true"},
+		{"security scan disabled", "go_build.yml", "  security:\n", "  security:\n    if: false\n"},
+		{"accepted key check removed", "go_build.yml", "          if [ \"$(git hash-object internal/testdata/priv.key)\" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then\n", ""},
+		{"openpgp go list errors ignored", "go_build.yml", "go list -deps -test ./... >> \"$dependencies\"", "go list -deps -test ./... >> \"$dependencies\" || true"},
+		{"security scan tolerates failure", "go_build.yml", "  security:\n", "  security:\n    continue-on-error: true\n"},
+		{"scanner checksum changed", "go_build.yml", "sum=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a", "sum=$(curl -fsSL \"$url.sha256\")"},
+		{"accepted findings mask a released fix", "go_build.yml", "--ignore-unfixed --ignorefile /dev/null", "--ignore-unfixed \"${accepted[@]}\""},
+		{"secret scan removed", "go_build.yml", "          scan --scanners secret --secret-config \"$dir/secret.yaml\" \"${accepted[@]}\"\n", ""},
+		{"secret scan skips tests and docs", "go_build.yml", "--secret-config \"$dir/secret.yaml\" ", ""},
+		{"scanner reads trivy.yaml from the tree", "go_build.yml", "fs --config /dev/null ", "fs "},
+		{"scanner reads TRIVY_* from the environment", "go_build.yml", "          unset \"${!TRIVY_@}\"\n", ""},
+		{"openpgp check without test packages", "go_build.yml", "go list -deps -test ./...", "go list -deps ./..."},
+		{"openpgp check tolerates a match", "go_build.yml", "END { exit found }", "END { exit 0 }"},
+		{"openpgp check misses a platform", "go_build.yml", " freebsd-amd64", ""},
 		{"caller disabled", "go_build.yml", "  ginkgo:\n", "  ginkgo:\n    if: false\n"},
 		{"caller tolerates failure", "go_build.yml", "  integration:\n", "  integration:\n    continue-on-error: true\n"},
 		{"caller inputs", "go_build.yml", "  ginkgo:\n", "  ginkgo:\n    with:\n      skip: true\n"},
@@ -346,13 +528,13 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"worker failure tolerated", "ginkgo_test.yml", "  build:\n", "  build:\n    continue-on-error: true\n"},
 		{"worker extra job", "ginkgo_test.yml", "jobs:\n", "jobs:\n  hidden:\n    runs-on: ubuntu-latest\n    steps: [{run: 'false'}]\n"},
 		{"native mac removed", "go_build.yml", ", \"macos-latest\"", ""},
-		{"Go matrix reduced", "ginkgo_test.yml", "\"1.23.x\", ", ""},
+		{"Go matrix reduced", "ginkgo_test.yml", "\"1.26.0\", ", ""},
 		{"action changed", "go_build.yml", "actions/checkout@v4", "actions/checkout@v3"},
 		{"contract checkout credentials", "go_build.yml", "persist-credentials: false", "persist-credentials: true"},
 		{"contract checkout defaults", "go_build.yml", "        with:\n          persist-credentials: false\n", ""},
 		{"contract checkout pin", "go_build.yml", "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/checkout@v4"},
 		{"contract Go setup pin", "go_build.yml", "actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff", "actions/setup-go@v5"},
-		{"action inputs changed", "go_build.yml", "go-version: ${{ matrix.go }}", "go-version: '1.24.x'"},
+		{"action inputs changed", "go_build.yml", "go-version: ${{ matrix.go }}", "go-version: '1.26.x'"},
 		{"steps reordered", "go_build.yml", "    - uses: actions/checkout@v4\n    - uses: actions/setup-go@v5", "    - uses: actions/setup-go@v5\n    - uses: actions/checkout@v4"},
 		{"integration native runner", "integration.yml", "${{ format('{0}-latest', matrix.os) }}", "ubuntu-latest"},
 		{"integration disabled", "integration.yml", "  integration:\n", "  integration:\n    if: false\n"},
@@ -471,24 +653,24 @@ func validateIntegrationUnion(jobs map[string]any) error {
 			"integration",
 			[]string{"os", "go", "race", "use32bit", "mode", "version"},
 			integrationCaseSet(
-				"ubuntu|1.23.x|false|false|v1|1",
-				"ubuntu|1.23.x|false|false|v2|2",
-				"ubuntu|1.23.x|false|false|gso|1",
-				"ubuntu|1.23.x|false|false|ecn|1",
-				"ubuntu|1.24.x|false|false|v1|1",
-				"ubuntu|1.24.x|false|false|v2|2",
-				"ubuntu|1.24.x|false|false|gso|1",
-				"ubuntu|1.24.x|false|false|ecn|1",
-				"ubuntu|1.24.x|true|false|v1|1",
-				"ubuntu|1.24.x|true|false|gso|1",
-				"ubuntu|1.24.x|false|true|v1|1",
-				"ubuntu|1.24.x|false|true|v2|2",
-				"ubuntu|1.24.x|false|true|gso|1",
-				"ubuntu|1.24.x|false|true|ecn|1",
-				"windows|1.24.x|false|false|v1|1",
-				"windows|1.24.x|false|false|v2|2",
-				"macos|1.24.x|false|false|v1|1",
-				"macos|1.24.x|false|false|v2|2",
+				"ubuntu|1.26.0|false|false|v1|1",
+				"ubuntu|1.26.0|false|false|v2|2",
+				"ubuntu|1.26.0|false|false|gso|1",
+				"ubuntu|1.26.0|false|false|ecn|1",
+				"ubuntu|1.26.x|false|false|v1|1",
+				"ubuntu|1.26.x|false|false|v2|2",
+				"ubuntu|1.26.x|false|false|gso|1",
+				"ubuntu|1.26.x|false|false|ecn|1",
+				"ubuntu|1.26.x|true|false|v1|1",
+				"ubuntu|1.26.x|true|false|gso|1",
+				"ubuntu|1.26.x|false|true|v1|1",
+				"ubuntu|1.26.x|false|true|v2|2",
+				"ubuntu|1.26.x|false|true|gso|1",
+				"ubuntu|1.26.x|false|true|ecn|1",
+				"windows|1.26.x|false|false|v1|1",
+				"windows|1.26.x|false|false|v2|2",
+				"macos|1.26.x|false|false|v1|1",
+				"macos|1.26.x|false|false|v2|2",
 			),
 			[]string{"go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=${{ matrix.version }} ${{ env.QLOGFLAG }}"},
 		},
@@ -496,12 +678,12 @@ func validateIntegrationUnion(jobs map[string]any) error {
 			"ancillary",
 			[]string{"os", "go", "race", "use32bit"},
 			integrationCaseSet(
-				"ubuntu|1.23.x|false|false",
-				"ubuntu|1.24.x|false|false",
-				"ubuntu|1.24.x|true|false",
-				"ubuntu|1.24.x|false|true",
-				"windows|1.24.x|false|false",
-				"macos|1.24.x|false|false",
+				"ubuntu|1.26.0|false|false",
+				"ubuntu|1.26.x|false|false",
+				"ubuntu|1.26.x|true|false",
+				"ubuntu|1.26.x|false|true",
+				"windows|1.26.x|false|false",
+				"macos|1.26.x|false|false",
 			),
 			[]string{"go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/tools/...", "go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/versionnegotiation ${{ env.QLOGFLAG }}"},
 		},
@@ -509,11 +691,11 @@ func validateIntegrationUnion(jobs map[string]any) error {
 			"benchmarks",
 			[]string{"os", "go", "race", "use32bit"},
 			integrationCaseSet(
-				"ubuntu|1.23.x|false|false",
-				"ubuntu|1.24.x|false|false",
-				"ubuntu|1.24.x|false|true",
-				"windows|1.24.x|false|false",
-				"macos|1.24.x|false|false",
+				"ubuntu|1.26.0|false|false",
+				"ubuntu|1.26.x|false|false",
+				"ubuntu|1.26.x|false|true",
+				"windows|1.26.x|false|false",
+				"macos|1.26.x|false|false",
 			),
 			[]string{"go test -v -run=^$ -timeout 5m -shuffle=on -bench=. ./integrationtests/self"},
 		},
