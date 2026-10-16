@@ -1,0 +1,22 @@
+vulnerabilities:
+  - id: GO-2026-5932
+    purls:
+      - pkg:golang/golang.org/x/crypto@v0.57.0
+    statement: >-
+      Исправления нет: пакет golang.org/x/crypto/openpgp заброшен целиком. Модуль его не
+      импортирует: job openpgp в CI падает, если пакет появится в go list -deps -test
+      любой платформы со своим кодом.
+misconfigurations:
+  - id: DS-0002
+    paths:
+      - .clusterfuzzlite/Dockerfile
+    statement: >-
+      Образ только собирает фаззеры ClusterFuzzLite: base-builder по замыслу
+      работает от root, и сборка фаззеров рассчитана на это.
+secrets:
+  - id: private-key
+    paths:
+      - internal/testdata/priv.key
+    statement: >-
+      Ключ тестового сертификата localhost из internal/testdata/generate_key.sh, открыт
+      вместе с исходником quic-go: его CA доверяют только тесты, пример и фаззинг этого репо.

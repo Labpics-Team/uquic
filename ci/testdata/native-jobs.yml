@@ -15,8 +15,8 @@ ginkgo_test.yml:
       fail-fast: false
       matrix:
         go:
-          - 1.23.x
-          - 1.24.x
+          - 1.26.0
+          - 1.26.x
 go_build.yml:
   build:
     runs-on: ${{ matrix.os }}
@@ -32,8 +32,8 @@ go_build.yml:
       fail-fast: false
       matrix:
         go:
-          - 1.21.x
-          - 1.22.x
+          - 1.26.0
+          - 1.26.x
         os:
           - ubuntu-latest
           - windows-latest
@@ -97,19 +97,19 @@ integration.yml:
       fail-fast: false
       matrix:
         go:
-          - 1.23.x
-          - 1.24.x
+          - 1.26.0
+          - 1.26.x
         include:
-          - go: 1.24.x
+          - go: 1.26.x
             os: ubuntu
             race: true
-          - go: 1.24.x
+          - go: 1.26.x
             os: ubuntu
             use32bit: true
-          - go: 1.24.x
+          - go: 1.26.x
             os: windows
             race: false
-          - go: 1.24.x
+          - go: 1.26.x
             os: macos
             race: false
         os:
