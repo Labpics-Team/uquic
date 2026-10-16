@@ -414,7 +414,7 @@ func TestAcceptedKeyMatchesReviewedBlob(t *testing.T) {
 	}
 	hash := func(data []byte) string {
 		h := sha1.New()
-		fmt.Fprintf(h, "blob %d\\x00", len(data))
+		fmt.Fprintf(h, "blob %d%c", len(data), 0)
 		h.Write(data)
 		return fmt.Sprintf("%x", h.Sum(nil))
 	}
