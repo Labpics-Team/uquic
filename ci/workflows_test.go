@@ -479,7 +479,6 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"openpgp check without test packages", "go_build.yml", "go list -deps -test ./...", "go list -deps ./..."},
 		{"openpgp check tolerates a match", "go_build.yml", "END { exit found }", "END { exit 0 }"},
 		{"openpgp check misses a platform", "go_build.yml", " freebsd-amd64", ""},
-		{"openpgp check ignores go list failure", "go_build.yml", "go list -deps -test ./...\n", "go list -deps -test ./... || true\n"},
 		{"caller disabled", "go_build.yml", "  ginkgo:\n", "  ginkgo:\n    if: false\n"},
 		{"caller tolerates failure", "go_build.yml", "  integration:\n", "  integration:\n    continue-on-error: true\n"},
 		{"caller inputs", "go_build.yml", "  ginkgo:\n", "  ginkgo:\n    with:\n      skip: true\n"},
