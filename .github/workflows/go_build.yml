@@ -122,6 +122,22 @@ jobs:
           done
           awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
 
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.x'
+      - name: Reject reachable vulnerabilities
+        run: |
+          set -euo pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+          (cd integrationtests/gomodvendor && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...)
+
   ginkgo:
     uses: ./.github/workflows/ginkgo_test.yml
 
@@ -130,7 +146,7 @@ jobs:
 
   gate:
     name: CI
-    needs: [contract, build, ginkgo, integration, security, openpgp]
+    needs: [contract, build, ginkgo, integration, security, openpgp, govulncheck]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -144,6 +160,7 @@ jobs:
           INTEGRATION: ${{ needs.integration.result }}
           SECURITY: ${{ needs.security.result }}
           OPENPGP: ${{ needs.openpgp.result }}
+          GOVULNCHECK: ${{ needs.govulncheck.result }}
         run: |
           test "$CONTRACT" = success
           test "$BUILD" = success
@@ -151,3 +168,4 @@ jobs:
           test "$INTEGRATION" = success
           test "$SECURITY" = success
           test "$OPENPGP" = success
+          test "$GOVULNCHECK" = success

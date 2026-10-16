@@ -394,6 +394,10 @@ func (h *cryptoSetup) GetSessionTicket() ([]byte, error) {
 		return nil, err
 	}
 	ev := h.conn.NextEvent()
+	if ev.Kind == tls.QUICNoEvent {
+		// TLS may omit the ticket when the selected server configuration disables them.
+		return nil, nil
+	}
 	if ev.Kind != tls.QUICWriteData || ev.Level != tls.QUICEncryptionLevelApplication {
 		panic("crypto/tls bug: where's my session ticket?")
 	}

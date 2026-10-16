@@ -61,7 +61,7 @@ func TestStreamReadCancellation(t *testing.T) {
 				str.CancelRead(quic.StreamErrorCode(str.StreamID()))
 			}()
 
-			timeout := time.After(time.Second)
+			timeout := time.After(scaleDuration(time.Second))
 			select {
 			case <-done:
 			case <-timeout:
@@ -122,7 +122,7 @@ func TestStreamWriteCancellation(t *testing.T) {
 				str.CancelWrite(quic.StreamErrorCode(str.StreamID()))
 			}()
 
-			timeout := time.After(time.Second)
+			timeout := time.After(scaleDuration(time.Second))
 			select {
 			case <-done:
 			case <-timeout:
@@ -273,7 +273,7 @@ func testStreamCancellation(
 		}(str)
 	}
 
-	timeout := time.After(time.Second)
+	timeout := time.After(scaleDuration(time.Second))
 	var clientErrs, serverErrs int
 	for range numStreams {
 		select {

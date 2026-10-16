@@ -15,7 +15,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.23.4 // indirect
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/refraction-networking/clienthellod v0.5.0-alpha2 // indirect
-	github.com/refraction-networking/utls v1.7.4-0.20250521174854-63aeec73c564 // indirect
+	github.com/refraction-networking/utls v1.8.3-0.20260924070827-6af385813fd8 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/mock v0.5.2 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
