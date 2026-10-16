@@ -94,7 +94,7 @@ func NewUCryptoSetupClient(
 		panic(err)
 	}
 
-	// cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient)) // [UQUIC] doesn't require this
+	cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient))
 
 	return cs
 }

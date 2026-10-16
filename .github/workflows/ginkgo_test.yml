@@ -21,6 +21,8 @@ jobs:
           go-version: ${{ matrix.go }}
       - run: go version
 
+      - name: Verify Chrome QUIC handshake completion
+        run: go test -timeout 45s -run TestChrome146_DifferentialAgainstRealChrome -v .
       - name: Run unit tests
         env:
           TIMESCALE_FACTOR: 10

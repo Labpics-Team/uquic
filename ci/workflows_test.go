@@ -116,9 +116,26 @@ steps:
       awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
 `
 
+const govulncheckJob = `
+runs-on: ubuntu-latest
+timeout-minutes: 15
+steps:
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    with:
+      persist-credentials: false
+  - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+    with:
+      go-version: '1.26.x'
+  - name: Reject reachable vulnerabilities
+    run: |
+      set -euo pipefail
+      go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      (cd integrationtests/gomodvendor && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...)
+`
+
 const gateJob = `
 name: CI
-needs: [contract, build, ginkgo, integration, security, openpgp]
+needs: [contract, build, ginkgo, integration, security, openpgp, govulncheck]
 if: ${{ always() }}
 runs-on: ubuntu-latest
 timeout-minutes: 5
@@ -132,6 +149,7 @@ steps:
       INTEGRATION: ${{ needs.integration.result }}
       SECURITY: ${{ needs.security.result }}
       OPENPGP: ${{ needs.openpgp.result }}
+      GOVULNCHECK: ${{ needs.govulncheck.result }}
     run: |
       test "$CONTRACT" = success
       test "$BUILD" = success
@@ -139,6 +157,7 @@ steps:
       test "$INTEGRATION" = success
       test "$SECURITY" = success
       test "$OPENPGP" = success
+      test "$GOVULNCHECK" = success
 `
 
 func parse(raw []byte) (map[string]any, error) {
@@ -241,6 +260,11 @@ func validate(files map[string][]byte) error {
 			}
 			expectedJobs["contract"] = contract
 			expectedJobs["security"] = security
+			govulncheck, err := parse([]byte(govulncheckJob))
+			if err != nil {
+				return fmt.Errorf("invalid govulncheck job fixture: %w", err)
+			}
+			expectedJobs["govulncheck"] = govulncheck
 			expectedJobs["openpgp"] = openpgp
 			expectedJobs["gate"] = gate
 			expectedJobs["ginkgo"] = map[string]any{"uses": "./.github/workflows/ginkgo_test.yml"}
@@ -380,7 +404,7 @@ func TestGateResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{"CONTRACT", "BUILD", "GINKGO", "INTEGRATION", "SECURITY", "OPENPGP"}
+	keys := []string{"CONTRACT", "BUILD", "GINKGO", "INTEGRATION", "SECURITY", "OPENPGP", "GOVULNCHECK"}
 	check := func(t *testing.T, results map[string]string, wantSuccess bool) {
 		t.Helper()
 		cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
@@ -499,12 +523,19 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"merge group removed", "go_build.yml", "  merge_group:\n", ""},
 		{"shared non-PR concurrency", "go_build.yml", "github.run_id", "github.ref"},
 		{"gate skips failures", "go_build.yml", "${{ always() }}", "${{ success() }}"},
-		{"gate misses integration", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp]", "needs: [contract, build, ginkgo, security, openpgp]"},
-		{"gate misses security", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp]", "needs: [contract, build, ginkgo, integration, openpgp]"},
-		{"gate misses openpgp", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp]", "needs: [contract, build, ginkgo, integration, security]"},
+		{"gate misses integration", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp, govulncheck]", "needs: [contract, build, ginkgo, security, openpgp, govulncheck]"},
+		{"gate misses security", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp, govulncheck]", "needs: [contract, build, ginkgo, integration, openpgp, govulncheck]"},
+		{"gate misses openpgp", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp, govulncheck]", "needs: [contract, build, ginkgo, integration, security, govulncheck]"},
 		{"gate unconditional success", "go_build.yml", "test \"$INTEGRATION\" = success", "true"},
 		{"gate ignores security", "go_build.yml", "test \"$SECURITY\" = success", "true"},
 		{"gate ignores openpgp", "go_build.yml", "test \"$OPENPGP\" = success", "true"},
+		{"gate ignores govulncheck", "go_build.yml", "test \"$GOVULNCHECK\" = success", "true"},
+		{"govulncheck removed from gate", "go_build.yml", "needs: [contract, build, ginkgo, integration, security, openpgp, govulncheck]", "needs: [contract, build, ginkgo, integration, security, openpgp]"},
+		{"govulncheck disabled", "go_build.yml", "  govulncheck:\n", "  govulncheck:\n    if: false\n"},
+		{"govulncheck tolerates failures", "go_build.yml", "  govulncheck:\n", "  govulncheck:\n    continue-on-error: true\n"},
+		{"govulncheck unpinned", "go_build.yml", "govulncheck@v1.9.0", "govulncheck@latest"},
+		{"govulncheck scan disabled", "go_build.yml", "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...", "echo skipped"},
+		{"govulncheck misses nested module", "go_build.yml", "(cd integrationtests/gomodvendor && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...)", "echo skipped"},
 		{"security scan disabled", "go_build.yml", "  security:\n", "  security:\n    if: false\n"},
 		{"accepted key check removed", "go_build.yml", "          if [ \"$(git hash-object internal/testdata/priv.key)\" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then\n", ""},
 		{"openpgp go list errors ignored", "go_build.yml", "go list -deps -test ./... >> \"$dependencies\"", "go list -deps -test ./... >> \"$dependencies\" || true"},
