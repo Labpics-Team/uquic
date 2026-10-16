@@ -62,6 +62,11 @@ jobs:
             "https://github.com/aquasecurity/trivy/releases/download/v$version/trivy_${version}_Linux-64bit.tar.gz"
           echo "$sum  $dir/trivy.tgz" | sha256sum -c -
           tar -xzf "$dir/trivy.tgz" -C "$dir" trivy
+          # Only the exact tracked test key may use the private-key exception.
+          if [ "$(git hash-object internal/testdata/priv.key)" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then
+            echo "accepted test key differs from its reviewed fixture" >&2
+            exit 1
+          fi
           accepted=(--ignorefile /dev/null)
           [ -f .trivyignore.yaml ] && accepted=(--ignorefile .trivyignore.yaml)
           # Настройки сканера задаёт шаг: trivy.yaml из проверяемого дерева их не меняет.
@@ -88,11 +93,14 @@ jobs:
       - name: Проверить отсутствие golang.org/x/crypto/openpgp
         run: |
           set -euo pipefail
+          dependencies="$(mktemp)"
+          trap 'rm -f "$dependencies"' EXIT
           for target in linux-amd64 linux-386 linux-arm64 darwin-amd64 darwin-arm64 freebsd-amd64 windows-amd64 windows-arm64 openbsd-amd64; do
             for cgo in 0 1; do
-              GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./...
+              GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./... >> "$dependencies"
             done
-          done | awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }'
+          done
+          awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
 
   ginkgo:
     uses: ./.github/workflows/ginkgo_test.yml
