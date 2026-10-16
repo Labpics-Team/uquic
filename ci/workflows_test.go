@@ -447,6 +447,45 @@ func TestAcceptedKeyMatchesReviewedBlob(t *testing.T) {
 	}
 }
 
+func TestOpenPGPRejectsForbiddenOrUnresolvedGraph(t *testing.T) {
+	files := workflows(t)
+	w, err := parse(files["go_build.yml"])
+	if err != nil { t.Fatal(err) }
+	job := w["jobs"].(map[string]any)["openpgp"].(map[string]any)
+	steps := job["steps"].([]any)
+	script := steps[len(steps)-1].(map[string]any)["run"].(string)
+	bash, err := gateBash()
+	if err != nil { t.Fatal(err) }
+	const stub = `go() {
+	  if [ "$GOOS-$GOARCH-$CGO_ENABLED" = "$PROBE_TARGET" ]; then
+	    case "$PROBE_MODE" in
+	      forbidden) echo golang.org/x/crypto/openpgp/armor; return 0 ;;
+	      fail) return 17 ;;
+	    esac
+	  fi
+	  echo fmt
+	}`
+	check := func(target, mode string, success bool) {
+		t.Helper()
+		cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", stub+"\n"+script)
+		cmd.Env = append(os.Environ(), "PROBE_TARGET="+target, "PROBE_MODE="+mode)
+		out, err := cmd.CombinedOutput()
+		if (err == nil) != success { t.Fatalf("target=%s mode=%s: err=%v, output=%s", target, mode, err, out) }
+	}
+	check("", "", true)
+	parts := strings.SplitN(script, "for target in ", 2)
+	if len(parts) != 2 { t.Fatal("no platform matrix") }
+	targets := strings.Fields(strings.SplitN(parts[1], "; do", 2)[0])
+	if len(targets) < 2 { t.Fatal("missing multi-platform coverage") }
+	for _, target := range targets {
+		for _, cgo := range []string{"0", "1"} {
+			key := target+"-"+cgo
+			t.Run(key+"/forbidden", func(t *testing.T) { check(key, "forbidden", false) })
+			t.Run(key+"/failed-go-list", func(t *testing.T) { check(key, "fail", false) })
+		}
+	}
+}
+
 func TestContractRejectsMutations(t *testing.T) {
 	mutations := []struct{ name, file, before, after string }{
 		{"integration gate skips failure", "integration.yml", "    if: ${{ always() }}", "    if: ${{ success() }}"},
