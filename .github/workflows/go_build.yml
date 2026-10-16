@@ -77,6 +77,26 @@ jobs:
           # Секрет в тестах, примерах и документации — такая же утечка: встроенные исключения trivy для них сняты.
           printf 'disable-allow-rules:\n  - tests\n  - examples\n  - markdown\n' > "$dir/secret.yaml"
           scan --scanners secret --secret-config "$dir/secret.yaml" "${accepted[@]}"
+          # Prove that the secret scanner actually recognizes keys in tests and Markdown.
+          probe="$dir/secret-probe"
+          mkdir -p "$probe/tests" "$probe/docs"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$probe/docs/probe.md" 2>/dev/null
+          cp "$probe/docs/probe.md" "$probe/tests/probe_test.go"
+          if "$dir/trivy" fs --config /dev/null --cache-dir "$dir/cache" --exit-code 1 --no-progress --scanners secret --secret-config "$dir/secret.yaml" --ignorefile /dev/null --format json --output "$dir/probe-results.json" "$probe"; then
+            echo "synthetic private keys were not rejected" >&2
+            exit 1
+          fi
+          python3 - "$dir/probe-results.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          found = {result.get("Target", "") for result in report.get("Results", [])
+                   if any(s.get("RuleID") == "private-key" for s in result.get("Secrets") or [])}
+          for name in ("docs/probe.md", "tests/probe_test.go"):
+              if not any(name in target for target in found):
+                  raise SystemExit(f"missing private-key detection in {name}")
+          PY
 
   openpgp:
     runs-on: ubuntu-latest
