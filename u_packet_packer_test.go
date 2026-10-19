@@ -3,6 +3,7 @@ package quic
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -86,6 +87,52 @@ func TestUInitialFlightFitsDatagramBudget(t *testing.T) {
 	}
 }
 
+func TestUInitialLawfulProfileFitsDatagramBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		cryptoMin, cryptoMax uint8
+		tokenLen, dataLen    int
+	}{
+		{name: "neighbor_control", cryptoMin: 2, cryptoMax: 3, dataLen: 70},
+		{name: "many_short_crypto", cryptoMin: 70, cryptoMax: 71, dataLen: 70},
+		{name: "long_token_small_crypto", cryptoMin: 2, cryptoMax: 8, tokenLen: 1020, dataLen: 8},
+		{name: "maximum_short_crypto", cryptoMin: 254, cryptoMax: 255, dataLen: 1},
+		{name: "maximum_crypto_crosses_varint", cryptoMin: 254, cryptoMax: 255, dataLen: 70},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp, packer := newTestUPacketPacker(t)
+			packer.uSpec.InitialPacketSpec.FrameBuilder = &QUICRandomFrames{
+				MinCRYPTO: tc.cryptoMin,
+				MaxCRYPTO: tc.cryptoMax,
+			}
+			packer.SetToken(bytes.Repeat([]byte{17}, tc.tokenLen))
+			original := bytes.Repeat([]byte{42}, tc.dataLen)
+			_, err := tp.initialStream.Write(original)
+			require.NoError(t, err)
+			packet, err := packer.PackCoalescedPacket(false, 1200, time.Now(), protocol.Version1)
+			require.NoError(t, err)
+			require.NotNil(t, packet)
+			defer packet.buffer.Release()
+			require.Equal(t, protocol.ByteCount(1200), packet.buffer.Len())
+			header, frames := initialFrames(t, packet)
+			require.Zero(t, header.PacketNumber)
+			reassembled, err := clienthellod.ReassembleCRYPTOFrames(frames)
+			require.NoError(t, err)
+			require.Equal(t, original, reassembled)
+			require.False(t, tp.initialStream.HasData())
+			require.False(t, tp.retransmissionQueue.HasInitialData())
+			var cryptoCount int
+			for _, frame := range frames {
+				if _, ok := frame.(*clienthellod.CRYPTO); ok {
+					cryptoCount++
+				}
+			}
+			require.GreaterOrEqual(t, cryptoCount, int(tc.cryptoMin))
+			require.Less(t, cryptoCount, int(tc.cryptoMax))
+		})
+	}
+}
+
 // Повтор CRYPTO в PTO обязан соблюдать тот же предел и сохранять абсолютный offset.
 func TestUInitialPTOFitsDatagramBudget(t *testing.T) {
 	tp, packer := newTestUPacketPacker(t)
@@ -109,6 +156,61 @@ func TestUInitialPTOFitsDatagramBudget(t *testing.T) {
 		packet.buffer.Release()
 	}
 	require.Equal(t, original, received)
+}
+
+func TestUInitialSentFramesReturnToLiveRetransmissionQueue(t *testing.T) {
+	tp, packer := newTestUPacketPacker(t)
+	original := bytes.Repeat([]byte{42}, 1500)
+	_, err := tp.initialStream.Write(original)
+	require.NoError(t, err)
+	packet, err := packer.PackCoalescedPacket(false, 1200, time.Now(), protocol.Version1)
+	require.NoError(t, err)
+	require.NotNil(t, packet)
+	_, frames := initialFrames(t, packet)
+	sent, err := clienthellod.ReassembleCRYPTOFrames(frames)
+	require.NoError(t, err)
+	require.NotEmpty(t, sent)
+	require.Equal(t, original, append(append([]byte(nil), sent...), tp.initialStream.writeBuf...))
+	for _, frame := range packet.longHdrPackets[0].frames {
+		frame.Handler.OnLost(frame.Frame)
+	}
+	packet.buffer.Release()
+	require.True(t, tp.retransmissionQueue.HasInitialData())
+	var received []byte
+	for tp.retransmissionQueue.HasInitialData() {
+		packet, err = packer.MaybePackPTOProbePacket(protocol.EncryptionInitial, 1200, time.Now(), protocol.Version1)
+		require.NoError(t, err)
+		require.NotNil(t, packet)
+		require.LessOrEqual(t, packet.buffer.Len(), protocol.ByteCount(1200))
+		_, frames = initialFrames(t, packet)
+		require.Equal(t, uint64(len(received)), cryptoBaseOffset(frames))
+		part, err := clienthellod.ReassembleCRYPTOFrames(frames)
+		require.NoError(t, err)
+		require.NotEmpty(t, part)
+		received = append(received, part...)
+		packet.buffer.Release()
+	}
+	require.Equal(t, sent, received)
+	require.Equal(t, original, append(received, tp.initialStream.writeBuf...))
+}
+
+func TestUInitialRetransmissionBudgetErrorKeepsQueue(t *testing.T) {
+	tp, packer := newTestUPacketPacker(t)
+	original := bytes.Repeat([]byte{42}, 3000)
+	frame := &wire.CryptoFrame{Offset: 16380, Data: original}
+	tp.retransmissionQueue.addInitial(frame)
+	tp.retransmissionQueue.AddPing(protocol.EncryptionInitial)
+	packer.uSpec.InitialPacketSpec.FrameBuilder = QUICFrames{QUICFrameCrypto{}, QUICFramePadding{Length: 1500}}
+	packet, err := packer.MaybePackPTOProbePacket(protocol.EncryptionInitial, 1200, time.Now(), protocol.Version1)
+	require.ErrorContains(t, err, "budget")
+	require.Nil(t, packet)
+	require.Equal(t, protocol.ByteCount(16380), frame.Offset)
+	require.Equal(t, original, frame.Data)
+	require.Equal(t, []*wire.CryptoFrame{frame}, tp.retransmissionQueue.initialCryptoData)
+	require.Len(t, tp.retransmissionQueue.initial, 1)
+	require.IsType(t, &wire.PingFrame{}, tp.retransmissionQueue.initial[0])
+	pn, _ := tp.pnManager.PeekPacketNumber(protocol.EncryptionInitial)
+	require.Zero(t, pn)
 }
 
 func unpackInitialFrames(t *testing.T, packet *coalescedPacket) []wire.Frame {
@@ -253,36 +355,64 @@ func TestUInitialCoalescedHandshakeRemainsReadable(t *testing.T) {
 	}
 }
 
-func TestUInitialLargeACKDoesNotConsumeCRYPTO(t *testing.T) {
-	ack := &wire.AckFrame{}
-	for number := protocol.PacketNumber(2000); number > 0; number -= 2 {
-		ack.AckRanges = append(ack.AckRanges, wire.AckRange{Smallest: number, Largest: number})
+func TestUInitialLargeACKPreservesCRYPTO(t *testing.T) {
+	for _, cryptoCount := range []uint8{2, 16} {
+		t.Run(fmt.Sprint(cryptoCount), func(t *testing.T) {
+			ack := &wire.AckFrame{}
+			for number := protocol.PacketNumber(2000); number > 0; number -= 2 {
+				ack.AckRanges = append(ack.AckRanges, wire.AckRange{Smallest: number, Largest: number})
+			}
+			tp, packer := newTestUPacketPacker(t, func(tp *testPacketPacker, _ *gomock.Controller) {
+				tp.ackFramer.EXPECT().GetAckFrame(protocol.EncryptionInitial, gomock.Any(), false).Return(ack)
+			})
+			packer.uSpec.InitialPacketSpec.FrameBuilder = &QUICRandomFrames{MinCRYPTO: cryptoCount, MaxCRYPTO: cryptoCount}
+			packer.SetToken(bytes.Repeat([]byte{1}, 128))
+			original := bytes.Repeat([]byte{23}, 100)
+			_, err := tp.initialStream.Write(original)
+			require.NoError(t, err)
+			packet, err := packer.PackCoalescedPacket(false, 1200, time.Now(), protocol.Version1)
+			require.NoError(t, err)
+			require.NotNil(t, packet)
+			require.LessOrEqual(t, packet.buffer.Len(), protocol.ByteCount(1200))
+			frames := unpackInitialFrames(t, packet)
+			require.IsType(t, &wire.AckFrame{}, frames[0])
+			var received []byte
+			if cryptoCount == 16 {
+				// Одного байта с 16 заголовками здесь недостаточно для прогресса.
+				require.Len(t, frames, 1)
+			} else {
+				// clienthellod не разбирает ACK; штатный parser уже отделил
+				// CRYPTO, которые собираем в порядке абсолютных offsets.
+				var cryptoFrames []*wire.CryptoFrame
+				for _, frame := range frames {
+					if crypto, ok := frame.(*wire.CryptoFrame); ok {
+						cryptoFrames = append(cryptoFrames, crypto)
+					}
+				}
+				sort.Slice(cryptoFrames, func(i, j int) bool { return cryptoFrames[i].Offset < cryptoFrames[j].Offset })
+				for _, crypto := range cryptoFrames {
+					require.Equal(t, protocol.ByteCount(len(received)), crypto.Offset)
+					received = append(received, crypto.Data...)
+				}
+				require.NotEmpty(t, received, "Помещающийся префикс должен уйти вместе с ACK")
+			}
+			packet.buffer.Release()
+			require.True(t, tp.initialStream.HasData())
+			require.Equal(t, original, append(append([]byte(nil), received...), tp.initialStream.writeBuf...))
+			packet, err = packer.PackCoalescedPacket(false, 1200, time.Now(), protocol.Version1)
+			require.NoError(t, err)
+			require.NotNil(t, packet)
+			defer packet.buffer.Release()
+			require.LessOrEqual(t, packet.buffer.Len(), protocol.ByteCount(1200))
+			header, cryptoFrames := initialFrames(t, packet)
+			require.Equal(t, protocol.PacketNumber(1), header.PacketNumber)
+			require.Equal(t, uint64(len(received)), cryptoBaseOffset(cryptoFrames))
+			reassembled, err := clienthellod.ReassembleCRYPTOFrames(cryptoFrames)
+			require.NoError(t, err)
+			require.Equal(t, original, append(received, reassembled...))
+			require.False(t, tp.initialStream.HasData())
+		})
 	}
-	tp, packer := newTestUPacketPacker(t, func(tp *testPacketPacker, _ *gomock.Controller) {
-		tp.ackFramer.EXPECT().GetAckFrame(protocol.EncryptionInitial, gomock.Any(), false).Return(ack)
-	})
-	packer.SetToken(bytes.Repeat([]byte{1}, 128))
-	original := bytes.Repeat([]byte{23}, 100)
-	_, err := tp.initialStream.Write(original)
-	require.NoError(t, err)
-	packet, err := packer.PackCoalescedPacket(false, 1200, time.Now(), protocol.Version1)
-	require.NoError(t, err)
-	require.NotNil(t, packet)
-	require.LessOrEqual(t, packet.buffer.Len(), protocol.ByteCount(1200))
-	frames := unpackInitialFrames(t, packet)
-	require.Len(t, frames, 1)
-	require.IsType(t, &wire.AckFrame{}, frames[0])
-	packet.buffer.Release()
-	require.True(t, tp.initialStream.HasData())
-	packet, err = packer.PackCoalescedPacket(false, 1200, time.Now(), protocol.Version1)
-	require.NoError(t, err)
-	require.NotNil(t, packet)
-	defer packet.buffer.Release()
-	require.LessOrEqual(t, packet.buffer.Len(), protocol.ByteCount(1200))
-	_, cryptoFrames := initialFrames(t, packet)
-	reassembled, err := clienthellod.ReassembleCRYPTOFrames(cryptoFrames)
-	require.NoError(t, err)
-	require.Equal(t, original, reassembled)
 }
 
 func TestUInitialRejectsImpossibleProfileBudget(t *testing.T) {
@@ -299,6 +429,10 @@ func TestUInitialRejectsImpossibleProfileBudget(t *testing.T) {
 			packet, err := packer.PackCoalescedPacket(false, 1280, time.Now(), protocol.Version1)
 			require.ErrorContains(t, err, "budget")
 			require.Nil(t, packet)
+			require.Equal(t, []byte("hello"), tp.initialStream.writeBuf)
+			require.Zero(t, tp.initialStream.writeOffset)
+			pn, _ := tp.pnManager.PeekPacketNumber(protocol.EncryptionInitial)
+			require.Zero(t, pn)
 		})
 	}
 }

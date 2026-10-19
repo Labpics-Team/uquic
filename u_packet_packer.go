@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -188,24 +189,28 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 	return packet, nil
 }
 
-// prepareInitialPacket резервирует заголовки раскладки до извлечения CRYPTO из
-// очереди. Окончательная раскладка выбирается один раз и участвует в общем бюджете
-// до добавления Handshake/0-RTT: повторная случайная раскладка изменила бы размер.
+// prepareInitialPacket выбирает раскладку один раз до добавления Handshake/0-RTT.
+// Очереди изменяются только после проверки сериализованного размера: ошибка
+// раскладки не должна расходовать CRYPTO, а непоместившийся хвост остаётся в очереди.
 func (p *uPacketPacker) prepareInitialPacket(maxSize protocol.ByteCount, overhead int, now time.Time, onlyAck bool, v protocol.Version) (*wire.ExtendedHeader, payload, []byte, error) {
-	budget := maxSize - protocol.ByteCount(overhead)
-	if !onlyAck {
-		if random, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(*QUICRandomFrames); ok {
-			// Каждый CRYPTO добавляет type и два varint длиной не более восьми
-			// байт; исходный единственный заголовок уже учтён базовым packer.
-			budget -= protocol.ByteCount(max(random.MinPING, random.MaxPING)) + protocol.ByteCount(max(random.MinCRYPTO, random.MaxCRYPTO))*(1+8+8)
-		}
-		if budget <= p.getLongHeader(protocol.EncryptionInitial, v).GetLength(v)+17 {
-			return nil, payload{}, nil, fmt.Errorf("QUIC Initial frame layout does not fit datagram budget %d", maxSize)
-		}
+	hasRetransmission := p.retransmissionQueue.HasInitialData()
+	if !onlyAck && (p.initialStream.HasData() || hasRetransmission) && p.initialDatagramMinSize() > maxSize {
+		return nil, payload{}, nil, fmt.Errorf("QUIC Initial minimum datagram size %d exceeds budget %d", p.initialDatagramMinSize(), maxSize)
 	}
-	hdr, pl := p.maybeGetCryptoPacket(budget, protocol.EncryptionInitial, now, onlyAck, true, v)
-	// Большой ACK может занять остаток после резервирования заголовков.
-	// PopCryptoFrame тогда не извлекает данные; отправляем ACK отдельно.
+	staged := *p.packetPacker
+	stream := *p.initialStream
+	queue := *p.retransmissionQueue
+	// GetInitialFrame может разделить первый CRYPTO и изменить его Offset/Data.
+	// Срез данных заимствуется: разделение выделяет хвост, исходные байты не меняет.
+	queue.initialCryptoData = make([]*wire.CryptoFrame, len(p.retransmissionQueue.initialCryptoData))
+	for index, frame := range p.retransmissionQueue.initialCryptoData {
+		copy := *frame
+		queue.initialCryptoData[index] = &copy
+	}
+	staged.initialStream = &stream
+	staged.retransmissionQueue = &queue
+	hdr, pl := staged.maybeGetCryptoPacket(maxSize-protocol.ByteCount(overhead), protocol.EncryptionInitial, now, onlyAck, true, v)
+	// Большой ACK может занять всё доступное место. Пустой CRYPTO не отправляем.
 	if len(pl.frames) == 1 {
 		if crypto, ok := pl.frames[0].Frame.(*wire.CryptoFrame); ok && len(crypto.Data) == 0 {
 			pl.length -= crypto.Length(v)
@@ -216,19 +221,62 @@ func (p *uPacketPacker) prepareInitialPacket(maxSize protocol.ByteCount, overhea
 		return nil, payload{}, nil, fmt.Errorf("QUIC Initial frames exceed datagram budget %d", maxSize)
 	}
 	if pl.length == 0 || onlyAck || len(pl.frames) == 0 {
+		if !onlyAck && pl.length == 0 && (p.initialStream.HasData() || hasRetransmission) {
+			return nil, payload{}, nil, fmt.Errorf("QUIC Initial frames do not fit datagram budget %d", maxSize)
+		}
 		return hdr, pl, nil, nil
 	}
-	if p.initialDatagramMinSize() > maxSize {
-		return nil, payload{}, nil, fmt.Errorf("QUIC Initial minimum datagram size %d exceeds budget %d", p.initialDatagramMinSize(), maxSize)
+	available := maxSize - hdr.GetLength(v) - protocol.ByteCount(overhead)
+	data, cryptoEnd, err := p.marshalInitialPacketPayload(pl, available, v)
+	if err != nil {
+		return nil, payload{}, nil, err
 	}
-	data, err := p.MarshalInitialPacketPayload(pl, maxSize-hdr.GetLength(v)-protocol.ByteCount(overhead), v)
-	if err == nil {
-		// Header protection требует минимум четыре байта PN + plaintext.
-		for len(data)+int(hdr.PacketNumberLen) < 4 {
-			data = append(data, 0)
+	// Header protection требует минимум четыре байта PN + plaintext.
+	for len(data)+int(hdr.PacketNumberLen) < 4 {
+		data = append(data, 0)
+	}
+	if protocol.ByteCount(len(data)) > available {
+		return nil, payload{}, nil, fmt.Errorf("QUIC Initial frame layout exceeds payload budget %d", available)
+	}
+
+	var unsent []*wire.CryptoFrame
+	frames := pl.frames[:0]
+	pl.length = 0
+	if pl.ack != nil {
+		pl.length = pl.ack.Length(v)
+	}
+	for _, frame := range pl.frames {
+		if crypto, ok := frame.Frame.(*wire.CryptoFrame); ok {
+			kept := min(max(0, cryptoEnd-crypto.Offset), protocol.ByteCount(len(crypto.Data)))
+			if kept < protocol.ByteCount(len(crypto.Data)) {
+				if hasRetransmission {
+					unsent = append(unsent, &wire.CryptoFrame{Offset: crypto.Offset + kept, Data: crypto.Data[kept:]})
+				} else {
+					stream.writeOffset = crypto.Offset + kept
+					stream.writeBuf = p.initialStream.writeBuf[kept:]
+				}
+			}
+			if kept == 0 {
+				continue
+			}
+			crypto.Data = crypto.Data[:kept]
 		}
+		frame.Handler = p.retransmissionQueue.InitialAckHandler()
+		frames = append(frames, frame)
+		pl.length += frame.Frame.Length(v)
 	}
-	return hdr, pl, data, err
+	pl.frames = frames
+	p.initialStream.writeOffset, p.initialStream.writeBuf = stream.writeOffset, stream.writeBuf
+	p.retransmissionQueue.initial = queue.initial
+	if len(unsent) > 0 {
+		queue.initialCryptoData = append(unsent, queue.initialCryptoData...)
+	}
+	p.retransmissionQueue.initialCryptoData = queue.initialCryptoData
+	if len(pl.frames) == 0 {
+		// ACK без CRYPTO использует обычное дополнение Initial-пакета.
+		return hdr, pl, nil, nil
+	}
+	return hdr, pl, data, nil
 }
 
 func (p *uPacketPacker) initialDatagramMinSize() protocol.ByteCount {
@@ -282,14 +330,14 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	}, nil
 }
 
-func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, maxSize protocol.ByteCount, v protocol.Version) ([]byte, error) {
+func (p *uPacketPacker) marshalInitialPacketPayload(pl payload, maxSize protocol.ByteCount, v protocol.Version) ([]byte, protocol.ByteCount, error) {
 	var originalFrameBytes []byte
 	var preserved []byte
 	var err error
 	if pl.ack != nil {
 		preserved, err = pl.ack.Append(preserved, v)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
@@ -298,49 +346,42 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, maxSize protocol
 		if _, ok := f.Frame.(*wire.CryptoFrame); !ok {
 			preserved, err = f.Frame.Append(preserved, v)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			continue
 		}
 
 		originalFrameBytes, err = f.Frame.Append(originalFrameBytes, v)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
 	// ACK и управляющие фреймы сохраняются вместе с CRYPTO, включая PTO без данных.
 	if len(originalFrameBytes) == 0 {
 		if protocol.ByteCount(len(preserved)) > maxSize {
-			return nil, fmt.Errorf("QUIC Initial control frames exceed payload budget %d", maxSize)
+			return nil, 0, fmt.Errorf("QUIC Initial control frames exceed payload budget %d", maxSize)
 		}
-		return preserved, nil
+		return preserved, 0, nil
 	}
 	qchframes, err := readQUICFrames(originalFrameBytes)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// parse crypto data
 	cryptoData, err := clienthellod.ReassembleCRYPTOFrames(qchframes)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	builder := p.uSpec.InitialPacketSpec.FrameBuilder
-	if random, ok := builder.(*QUICRandomFrames); ok {
-		// PADDING использует оставшееся место; данные и количество CRYPTO/PING
-		// сохраняются. Спецификация не меняется и безопасна для повторного Dial.
-		copy := *random
-		available := maxSize - protocol.ByteCount(len(preserved))
-		if available < 0 {
-			return nil, fmt.Errorf("QUIC Initial control frames exceed payload budget %d", maxSize)
-		}
-		if protocol.ByteCount(copy.Length) > available {
-			copy.Length = uint16(available)
-		}
-		builder = &copy
+	available := maxSize - protocol.ByteCount(len(preserved))
+	if available < 0 {
+		return nil, 0, fmt.Errorf("QUIC Initial control frames exceed payload budget %d", maxSize)
 	}
+	baseOffset := cryptoBaseOffset(qchframes)
+	consumed := len(cryptoData)
 	var encoded []byte
 	if qf, ok := builder.(QUICFrames); builder == nil || ok && len(qf) == 0 {
 		qfs := QUICFrames{}
@@ -350,18 +391,25 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, maxSize protocol
 			}
 		}
 		encoded, err = qfs.Build(cryptoData)
+	} else if random, ok := builder.(*QUICRandomFrames); ok {
+		encoded, consumed, err = random.buildAtWithLimit(cryptoData, baseOffset, int(available))
+		if errors.Is(err, errInitialFrameBudget) && len(preserved) > 0 {
+			// ACK/PTO управляющие фреймы отправляются сейчас, CRYPTO остаётся
+			// в очереди и получит полный бюджет следующего Initial.
+			return preserved, protocol.ByteCount(baseOffset), nil
+		}
 	} else if oab, ok := builder.(offsetAwareFrameBuilder); ok {
-		encoded, err = oab.BuildAt(cryptoData, cryptoBaseOffset(qchframes))
+		encoded, err = oab.BuildAt(cryptoData, baseOffset)
 	} else {
 		encoded, err = builder.Build(cryptoData)
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if protocol.ByteCount(len(preserved)+len(encoded)) > maxSize {
-		return nil, fmt.Errorf("QUIC Initial frame layout exceeds payload budget %d", maxSize)
+		return nil, 0, fmt.Errorf("QUIC Initial frame layout exceeds payload budget %d", maxSize)
 	}
-	return append(preserved, encoded...), nil
+	return append(preserved, encoded...), protocol.ByteCount(baseOffset) + protocol.ByteCount(consumed), nil
 }
 
 // cryptoBaseOffset returns the lowest CRYPTO-frame offset among the given frames,
