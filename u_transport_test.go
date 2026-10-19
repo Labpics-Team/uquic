@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/wire"
 	"github.com/refraction-networking/uquic/logging"
 	tls "github.com/refraction-networking/utls"
 	"github.com/stretchr/testify/require"
@@ -26,6 +27,7 @@ func dialUTransportInitial(t *testing.T, spec *QUICSpec, conf *Config, early boo
 
 	type readResult struct {
 		size int
+		data []byte
 		err  error
 	}
 	packet := make(chan readResult, 1)
@@ -34,7 +36,7 @@ func dialUTransportInitial(t *testing.T, spec *QUICSpec, conf *Config, early boo
 		defer close(readDone)
 		buf := make([]byte, 65535)
 		n, _, err := server.ReadFrom(buf)
-		packet <- readResult{size: n, err: err}
+		packet <- readResult{size: n, data: buf[:n], err: err}
 	}()
 	defer func() { server.Close(); <-readDone }()
 
@@ -56,6 +58,21 @@ func dialUTransportInitial(t *testing.T, spec *QUICSpec, conf *Config, early boo
 	select {
 	case result := <-packet:
 		require.NoError(t, result.err)
+		if conf != nil && conf.InitialPacketSize != 0 {
+			// Первый Initial может быть короче лимита: отдельно проверяем
+			// бюджет действующего соединения, выбранного по отправленному пакету.
+			header, _, _, err := wire.ParsePacket(result.data)
+			require.NoError(t, err)
+			require.NotNil(t, header)
+			// UDP-приём не синхронизирует публикацию handlerMap в dial.
+			transport.mutex.Lock()
+			handler, ok := transport.handlerMap.Get(header.SrcConnectionID)
+			transport.mutex.Unlock()
+			require.True(t, ok)
+			conn, ok := handler.(*connection)
+			require.True(t, ok)
+			require.Equal(t, conf.InitialPacketSize, conn.config.InitialPacketSize, "изменён явный бюджет соединения")
+		}
 		return result.size, nil
 	case err := <-dialResult:
 		// После отказа проверяем и очередь сокета: ранний возврат Dial не
