@@ -133,32 +133,41 @@ func TestUTransportInitialDatagramBudget(t *testing.T) {
 
 func TestUTransportCustomMinimumDatagramSize(t *testing.T) {
 	require.Less(t, protocol.InitialPacketSize, protocol.MaxPacketBufferSize)
-	for _, tc := range []struct {
-		name        string
-		early       bool
-		emptyConfig bool
-	}{
-		{name: "dial_nil"},
-		{name: "dial_empty", emptyConfig: true},
-		{name: "dial_early_nil", early: true},
-		{name: "dial_early_empty", early: true, emptyConfig: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, early := range []bool{false, true} {
+		t.Run(fmt.Sprintf("early=%t", early), func(t *testing.T) {
 			for minimum := protocol.InitialPacketSize + 1; minimum <= protocol.MaxPacketBufferSize; minimum++ {
 				t.Run(fmt.Sprint(minimum), func(t *testing.T) {
-					spec, err := QUICID2Spec(QUICFirefox_116A)
-					require.NoError(t, err)
-					spec.UDPDatagramMinSize = minimum
-					var conf, originalConfig *Config
-					if tc.emptyConfig {
-						conf = &Config{}
-						originalConfig = conf.Clone()
+					for _, tc := range []struct {
+						name      string
+						conf      *Config
+						wantError bool
+					}{
+						{name: "nil"},
+						{name: "empty", conf: &Config{}},
+						{name: "explicit_below", conf: &Config{InitialPacketSize: uint16(minimum - 1)}, wantError: true},
+						{name: "explicit_matching", conf: &Config{InitialPacketSize: uint16(minimum)}},
+						{name: "explicit_maximum", conf: &Config{InitialPacketSize: protocol.MaxPacketBufferSize}},
+					} {
+						t.Run(tc.name, func(t *testing.T) {
+							spec, err := QUICID2Spec(QUICFirefox_116A)
+							require.NoError(t, err)
+							spec.UDPDatagramMinSize = minimum
+							var originalConfig *Config
+							if tc.conf != nil {
+								originalConfig = tc.conf.Clone()
+							}
+							size, err := dialUTransportInitial(t, &spec, tc.conf, early)
+							if tc.wantError {
+								require.ErrorContains(t, err, fmt.Sprintf("minimum datagram size %d exceeds budget %d", minimum, tc.conf.InitialPacketSize))
+								require.Zero(t, size)
+							} else {
+								require.NoError(t, err)
+								require.Equal(t, minimum, size)
+							}
+							require.Equal(t, originalConfig, tc.conf, "нормализация изменила конфигурацию вызывающего кода")
+							require.Equal(t, minimum, spec.UDPDatagramMinSize, "вызов изменил общий профиль")
+						})
 					}
-					size, err := dialUTransportInitial(t, &spec, conf, tc.early)
-					require.NoError(t, err)
-					require.Equal(t, minimum, size)
-					require.Equal(t, originalConfig, conf, "нормализация изменила конфигурацию вызывающего кода")
-					require.Equal(t, minimum, spec.UDPDatagramMinSize, "вызов изменил общий профиль")
 				})
 			}
 		})
