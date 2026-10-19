@@ -142,6 +142,33 @@ func TestQUICRandomFramesBoundedLayoutRejectsNoProgress(t *testing.T) {
 	}
 }
 
+func TestQUICRandomFramesBoundedLayoutKeepsNonEmptySplits(t *testing.T) {
+	builder := QUICRandomFrames{MinCRYPTO: 7, MaxCRYPTO: 7}
+	data := bytes.Repeat([]byte{42}, 4096)
+	copy(data, []byte{1, 0, 15, 252}) // Заголовок ClientHello с полным размером 4096.
+	for _, budget := range []int{5000, 100} {
+		for iteration := 0; iteration < 16; iteration++ {
+			encoded, consumed, err := builder.buildAtWithLimit(data, 0, budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if consumed < 7 {
+				t.Fatalf("fixture has no room for seven non-empty frames: %d", consumed)
+			}
+			frames, err := readQUICFrames(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, frame := range frames {
+				if crypto, ok := frame.(*clienthellod.CRYPTO); ok && crypto.Length == 0 {
+					reconstructor := clienthellod.NewQUICClientHelloReconstructor()
+					t.Fatalf("budget=%d prefix=%d empty CRYPTO at %d; collector: %v", budget, consumed, crypto.Offset, reconstructor.FromFrames(frames))
+				}
+			}
+		}
+	}
+}
+
 func TestQUICFrameReaderKeepsTrailingFrames(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

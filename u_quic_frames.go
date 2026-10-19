@@ -330,21 +330,25 @@ func (qrf *QUICRandomFrames) buildAtWithLimit(cryptoData []byte, baseOffset uint
 		return nil, 0, err
 	}
 	if len(dryrunPayload) > maxSize {
-		// При сокращении префикса длины и абсолютные offsets не растут.
-		// Поэтому точный сериализованный размер монотонен по числу байтов.
-		prefixFrame := func(frame QUICFrameCrypto, n int) QUICFrameCrypto {
-			relative := min(int(uint64(frame.Offset)-baseOffset), n)
-			length := n - relative
-			if frame.Length > 0 {
-				length = min(length, frame.Length)
-			}
-			return QUICFrameCrypto{Offset: int(baseOffset) + relative, Length: length}
-		}
+		// Каждому выбранному CRYPTO оставляем по байту, пока данных хватает.
+		// Длины и offsets монотонны по размеру префикса; случайный выбор
+		// повторять не нужно, а пустые хвосты не заменяют непустое разбиение.
+		prefixFrames := make([]QUICFrameCrypto, len(frameList)-int(numPING))
 		prefixSize := func(n int) int {
 			size := int(numPING)
-			for _, frame := range frameList[numPING:] {
-				crypto := prefixFrame(frame.(QUICFrameCrypto), n)
+			remaining, offset := n, baseOffset
+			for index, frame := range frameList[numPING:] {
+				crypto := frame.(QUICFrameCrypto)
+				length := crypto.Length
+				if length == 0 {
+					length = len(cryptoData) - int(uint64(crypto.Offset)-baseOffset)
+				}
+				length = min(length, remaining, max(1, remaining-(len(prefixFrames)-index-1)))
+				crypto = QUICFrameCrypto{Offset: int(offset), Length: length}
+				prefixFrames[index] = crypto
 				size += 1 + quicvarint.Len(uint64(crypto.Offset)) + quicvarint.Len(uint64(crypto.Length)) + crypto.Length
+				remaining -= length
+				offset += uint64(length)
 			}
 			return size
 		}
@@ -360,8 +364,9 @@ func (qrf *QUICRandomFrames) buildAtWithLimit(cryptoData []byte, baseOffset uint
 				high = middle - 1
 			}
 		}
-		for index := int(numPING); index < len(frameList); index++ {
-			frameList[index] = prefixFrame(frameList[index].(QUICFrameCrypto), low)
+		prefixSize(low)
+		for index, frame := range prefixFrames {
+			frameList[int(numPING)+index] = frame
 		}
 		cryptoData = cryptoData[:low]
 		dryrunPayload, err = frameList.Build(cryptoData)
