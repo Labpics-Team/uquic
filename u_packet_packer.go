@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"bytes"
 	"fmt"
 	"time"
 
@@ -42,6 +41,7 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 		initialPayload, handshakePayload, zeroRTTPayload, oneRTTPayload payload
 		oneRTTPacketNumber                                              protocol.PacketNumber
 		oneRTTPacketNumberLen                                           protocol.PacketNumberLen
+		initialData                                                     []byte
 	)
 	// Try packing an Initial packet.
 	initialSealer, err := p.cryptoSetup.GetInitialSealer()
@@ -50,16 +50,16 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 	}
 	var size protocol.ByteCount
 	if initialSealer != nil {
-		initialHdr, initialPayload = p.maybeGetCryptoPacket(
-			maxSize-protocol.ByteCount(initialSealer.Overhead()),
-			protocol.EncryptionInitial,
-			now,
-			onlyAck,
-			true,
-			v,
-		)
+		initialHdr, initialPayload, initialData, err = p.prepareInitialPacket(maxSize, initialSealer.Overhead(), now, onlyAck, v)
+		if err != nil {
+			return nil, err
+		}
 		if initialPayload.length > 0 {
-			size += p.longHeaderPacketLength(initialHdr, initialPayload, v) + protocol.ByteCount(initialSealer.Overhead())
+			if initialData != nil {
+				size = initialHdr.GetLength(v) + protocol.ByteCount(len(initialData)+initialSealer.Overhead())
+			} else {
+				size = p.longHeaderPacketLength(initialHdr, initialPayload, v) + protocol.ByteCount(initialSealer.Overhead())
+			}
 		}
 
 		// // [UQUIC]
@@ -148,7 +148,7 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 			}
 			packet.longHdrPackets = append(packet.longHdrPackets, cont)
 		} else { // [UQUIC]
-			cont, err := p.appendInitialPacket(buffer, initialHdr, initialPayload, protocol.EncryptionInitial, initialSealer, v)
+			cont, err := p.appendInitialPacket(buffer, initialHdr, initialPayload, initialData, protocol.EncryptionInitial, initialSealer, v)
 			if err != nil {
 				return nil, err
 			}
@@ -170,26 +170,83 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 		}
 		packet.longHdrPackets = append(packet.longHdrPackets, longHdrPacket)
 	} else if oneRTTPayload.length > 0 {
-		shp, err := p.appendShortHeaderPacket(buffer, connID, oneRTTPacketNumber, oneRTTPacketNumberLen, kp, oneRTTPayload, 0, maxSize, oneRTTSealer, false, v)
+		var padding protocol.ByteCount
+		if initialData != nil {
+			// Короткий заголовок занимает остаток датаграммы: padding должен
+			// войти в шифруемый пакет, иначе изменится его authentication tag.
+			padding = max(0, p.initialDatagramMinSize()-size)
+		}
+		shp, err := p.appendShortHeaderPacket(buffer, connID, oneRTTPacketNumber, oneRTTPacketNumberLen, kp, oneRTTPayload, padding, maxSize, oneRTTSealer, false, v)
 		if err != nil {
 			return nil, err
 		}
 		packet.shortHdrPacket = &shp
 	}
+	if initialData != nil {
+		p.padInitialDatagram(buffer)
+	}
 	return packet, nil
 }
 
-// [UQUIC]
-func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
-	// Shouldn't need this?
-	// if p.uSpec.InitialPacketSpec.InitPacketNumberLength > 0 {
-	// 	header.PacketNumberLen = p.uSpec.InitialPacketSpec.InitPacketNumberLength
-	// }
-
-	uPayload, err := p.MarshalInitialPacketPayload(pl, v)
-	if err != nil {
-		return nil, err
+// prepareInitialPacket резервирует заголовки раскладки до извлечения CRYPTO из
+// очереди. Окончательная раскладка выбирается один раз и участвует в общем бюджете
+// до добавления Handshake/0-RTT: повторная случайная раскладка изменила бы размер.
+func (p *uPacketPacker) prepareInitialPacket(maxSize protocol.ByteCount, overhead int, now time.Time, onlyAck bool, v protocol.Version) (*wire.ExtendedHeader, payload, []byte, error) {
+	budget := maxSize - protocol.ByteCount(overhead)
+	if !onlyAck {
+		if random, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(*QUICRandomFrames); ok {
+			// Каждый CRYPTO добавляет type и два varint длиной не более восьми
+			// байт; исходный единственный заголовок уже учтён базовым packer.
+			budget -= protocol.ByteCount(max(random.MinPING, random.MaxPING)) + protocol.ByteCount(max(random.MinCRYPTO, random.MaxCRYPTO))*(1+8+8)
+		}
+		if budget <= p.getLongHeader(protocol.EncryptionInitial, v).GetLength(v)+17 {
+			return nil, payload{}, nil, fmt.Errorf("QUIC Initial frame layout does not fit datagram budget %d", maxSize)
+		}
 	}
+	hdr, pl := p.maybeGetCryptoPacket(budget, protocol.EncryptionInitial, now, onlyAck, true, v)
+	// Большой ACK может занять остаток после резервирования заголовков.
+	// PopCryptoFrame тогда не извлекает данные; отправляем ACK отдельно.
+	if len(pl.frames) == 1 {
+		if crypto, ok := pl.frames[0].Frame.(*wire.CryptoFrame); ok && len(crypto.Data) == 0 {
+			pl.length -= crypto.Length(v)
+			pl.frames = nil
+		}
+	}
+	if pl.length > 0 && hdr.GetLength(v)+pl.length+protocol.ByteCount(overhead) > maxSize {
+		return nil, payload{}, nil, fmt.Errorf("QUIC Initial frames exceed datagram budget %d", maxSize)
+	}
+	if pl.length == 0 || onlyAck || len(pl.frames) == 0 {
+		return hdr, pl, nil, nil
+	}
+	if p.initialDatagramMinSize() > maxSize {
+		return nil, payload{}, nil, fmt.Errorf("QUIC Initial minimum datagram size %d exceeds budget %d", p.initialDatagramMinSize(), maxSize)
+	}
+	data, err := p.MarshalInitialPacketPayload(pl, maxSize-hdr.GetLength(v)-protocol.ByteCount(overhead), v)
+	if err == nil {
+		// Header protection требует минимум четыре байта PN + plaintext.
+		for len(data)+int(hdr.PacketNumberLen) < 4 {
+			data = append(data, 0)
+		}
+	}
+	return hdr, pl, data, err
+}
+
+func (p *uPacketPacker) initialDatagramMinSize() protocol.ByteCount {
+	if p.uSpec.UDPDatagramMinSize != 0 {
+		return protocol.ByteCount(p.uSpec.UDPDatagramMinSize)
+	}
+	return DefaultUDPDatagramMinSize
+}
+
+func (p *uPacketPacker) padInitialDatagram(buffer *packetBuffer) {
+	// UDP padding находится после всех длинных пакетов, чтобы не скрыть
+	// следующий coalesced packet от parser получателя.
+	if padding := p.initialDatagramMinSize() - buffer.Len(); padding > 0 {
+		buffer.Data = append(buffer.Data, make([]byte, padding)...)
+	}
+}
+
+func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, uPayload []byte, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
 
 	pnLen := protocol.ByteCount(header.PacketNumberLen)
 	header.Length = pnLen + protocol.ByteCount(sealer.Overhead()) + protocol.ByteCount(len(uPayload))
@@ -197,7 +254,7 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	startLen := len(buffer.Data)
 	raw := buffer.Data[startLen:] // [UQUIC] the raw here is a sub-slice of buffer.Data, latter's len < size
 
-	raw, err = header.Append(raw, v)
+	raw, err := header.Append(raw, v)
 	if err != nil {
 		return nil, err
 	}
@@ -213,16 +270,6 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 
 	// fmt.Printf("Post-Encryption: %x\n", raw)
 
-	// [UQUIC]
-	// append zero to buffer.Data until min size is reached
-	minUDPSize := p.uSpec.UDPDatagramMinSize
-	if minUDPSize == 0 {
-		minUDPSize = DefaultUDPDatagramMinSize
-	}
-	if len(buffer.Data) < minUDPSize {
-		buffer.Data = append(buffer.Data, make([]byte, minUDPSize-len(buffer.Data))...)
-	}
-
 	if pn := p.pnManager.PopPacketNumber(encLevel); pn != header.PacketNumber {
 		return nil, fmt.Errorf("packetPacker BUG: Peeked and Popped packet numbers do not match: expected %d, got %d", pn, header.PacketNumber)
 	}
@@ -235,13 +282,24 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	}, nil
 }
 
-func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Version) ([]byte, error) {
+func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, maxSize protocol.ByteCount, v protocol.Version) ([]byte, error) {
 	var originalFrameBytes []byte
+	var preserved []byte
+	var err error
+	if pl.ack != nil {
+		preserved, err = pl.ack.Append(preserved, v)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	for _, f := range pl.frames {
 		var err error
-		// only append crypto frames
 		if _, ok := f.Frame.(*wire.CryptoFrame); !ok {
+			preserved, err = f.Frame.Append(preserved, v)
+			if err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -251,10 +309,14 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		}
 	}
 
-	// extract CryptoData from originalFrameBytes
-	// parse frames
-	r := bytes.NewReader(originalFrameBytes)
-	qchframes, err := clienthellod.ReadAllFrames(r)
+	// ACK и управляющие фреймы сохраняются вместе с CRYPTO, включая PTO без данных.
+	if len(originalFrameBytes) == 0 {
+		if protocol.ByteCount(len(preserved)) > maxSize {
+			return nil, fmt.Errorf("QUIC Initial control frames exceed payload budget %d", maxSize)
+		}
+		return preserved, nil
+	}
+	qchframes, err := readQUICFrames(originalFrameBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -265,28 +327,41 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		return nil, err
 	}
 
-	if qf, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(QUICFrames); p.uSpec.InitialPacketSpec.FrameBuilder == nil || ok && len(qf) == 0 {
+	builder := p.uSpec.InitialPacketSpec.FrameBuilder
+	if random, ok := builder.(*QUICRandomFrames); ok {
+		// PADDING использует оставшееся место; данные и количество CRYPTO/PING
+		// сохраняются. Спецификация не меняется и безопасна для повторного Dial.
+		copy := *random
+		available := maxSize - protocol.ByteCount(len(preserved))
+		if available < 0 {
+			return nil, fmt.Errorf("QUIC Initial control frames exceed payload budget %d", maxSize)
+		}
+		if protocol.ByteCount(copy.Length) > available {
+			copy.Length = uint16(available)
+		}
+		builder = &copy
+	}
+	var encoded []byte
+	if qf, ok := builder.(QUICFrames); builder == nil || ok && len(qf) == 0 {
 		qfs := QUICFrames{}
 		for _, frame := range qchframes {
 			if cryptoFrame, ok := frame.(*clienthellod.CRYPTO); ok {
 				qfs = append(qfs, QUICFrameCrypto{int(cryptoFrame.Offset), int(cryptoFrame.Length)})
 			}
 		}
-		return qfs.Build(cryptoData)
+		encoded, err = qfs.Build(cryptoData)
+	} else if oab, ok := builder.(offsetAwareFrameBuilder); ok {
+		encoded, err = oab.BuildAt(cryptoData, cryptoBaseOffset(qchframes))
+	} else {
+		encoded, err = builder.Build(cryptoData)
 	}
-
-	// cryptoData has been reassembled with its base offset stripped (it always starts
-	// at index 0 here). When the ClientHello spans multiple Initial packets — as the
-	// post-quantum Chrome ClientHello does — this packet's crypto data starts at a
-	// non-zero offset in the crypto stream. An offset-aware builder must re-apply that
-	// base offset, otherwise later packets would emit CRYPTO frames at offset 0 and
-	// corrupt the server-side reassembly. Builders that are not offset-aware are only
-	// correct for single-packet ClientHellos.
-	baseOffset := cryptoBaseOffset(qchframes)
-	if oab, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(offsetAwareFrameBuilder); ok {
-		return oab.BuildAt(cryptoData, baseOffset)
+	if err != nil {
+		return nil, err
 	}
-	return p.uSpec.InitialPacketSpec.FrameBuilder.Build(cryptoData)
+	if protocol.ByteCount(len(preserved)+len(encoded)) > maxSize {
+		return nil, fmt.Errorf("QUIC Initial frame layout exceeds payload budget %d", maxSize)
+	}
+	return append(preserved, encoded...), nil
 }
 
 // cryptoBaseOffset returns the lowest CRYPTO-frame offset among the given frames,
@@ -355,7 +430,18 @@ func (p *uPacketPacker) MaybePackPTOProbePacket(
 	default:
 		panic("unknown encryption level")
 	}
-	hdr, pl := p.maybeGetCryptoPacket(maxPacketSize-protocol.ByteCount(sealer.Overhead()), encLevel, now, false, true, v)
+	var hdr *wire.ExtendedHeader
+	var pl payload
+	var initialData []byte
+	if encLevel == protocol.EncryptionInitial && p.uSpec != nil {
+		var err error
+		hdr, pl, initialData, err = p.prepareInitialPacket(maxPacketSize, sealer.Overhead(), now, false, v)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		hdr, pl = p.maybeGetCryptoPacket(maxPacketSize-protocol.ByteCount(sealer.Overhead()), encLevel, now, false, true, v)
+	}
 	if pl.length == 0 {
 		return nil, nil
 	}
@@ -364,15 +450,16 @@ func (p *uPacketPacker) MaybePackPTOProbePacket(
 	size := p.longHeaderPacketLength(hdr, pl, v) + protocol.ByteCount(sealer.Overhead())
 	var padding protocol.ByteCount
 	if encLevel == protocol.EncryptionInitial {
-		if p.uSpec == nil { // default behavior
+		if initialData == nil { // default behavior
 			padding = p.initialPaddingLen(pl.frames, size, maxPacketSize)
 		} else { // otherwise we resend the spec-based initial packet
-			initPkt, err := p.appendInitialPacket(buffer, hdr, pl, protocol.EncryptionInitial, sealer, v)
+			initPkt, err := p.appendInitialPacket(buffer, hdr, pl, initialData, protocol.EncryptionInitial, sealer, v)
 			if err != nil {
 				return nil, err
 			}
 
 			packet.longHdrPackets = []*longHeaderPacket{initPkt}
+			p.padInitialDatagram(buffer)
 			return packet, nil
 		}
 	}
