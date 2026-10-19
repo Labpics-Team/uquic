@@ -2,6 +2,7 @@ package quic
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/refraction-networking/clienthellod"
@@ -73,6 +74,98 @@ func TestQUICRandomFrames(t *testing.T) {
 
 	if cryptoCount < int(testQUICRandomFrames.MinCRYPTO) || cryptoCount >= int(testQUICRandomFrames.MaxCRYPTO) {
 		t.Fatalf("CRYPTO frame count mismatch: got %d, want [%d, %d)", cryptoCount, testQUICRandomFrames.MinCRYPTO, testQUICRandomFrames.MaxCRYPTO)
+	}
+}
+
+func TestQUICRandomFramesBoundedLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		cryptoCount, pingCount      uint8
+		base                        uint64
+		dataLen, budget, wantPrefix int
+		padding                     uint16
+	}{
+		{name: "short_frames_fit_exactly", cryptoCount: 70, dataLen: 70, budget: 286, wantPrefix: 70},
+		{name: "short_frames_keep_tail", cryptoCount: 70, dataLen: 70, budget: 285, wantPrefix: 69},
+		{name: "large_offset", cryptoCount: 1, pingCount: 2, base: 16384, dataLen: 200, budget: 70, wantPrefix: 62},
+		{name: "before_length_varint", cryptoCount: 1, pingCount: 2, base: 16384, dataLen: 200, budget: 72, wantPrefix: 63},
+		{name: "after_length_varint", cryptoCount: 1, pingCount: 2, base: 16384, dataLen: 200, budget: 73, wantPrefix: 64},
+		{name: "padding_uses_remaining_budget", cryptoCount: 2, pingCount: 2, dataLen: 8, budget: 120, wantPrefix: 8, padding: 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := QUICRandomFrames{
+				MinCRYPTO: tc.cryptoCount, MaxCRYPTO: tc.cryptoCount,
+				MinPING: tc.pingCount, MaxPING: tc.pingCount,
+				MinPADDING: 3, MaxPADDING: 3, Length: tc.padding,
+			}
+			originalBuilder := builder
+			data := bytes.Repeat([]byte{42}, tc.dataLen)
+			encoded, consumed, err := builder.buildAtWithLimit(data, tc.base, tc.budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if consumed != tc.wantPrefix || len(encoded) > tc.budget || builder != originalBuilder {
+				t.Fatalf("prefix=%d, want=%d, wire=%d, budget=%d, builder=%+v", consumed, tc.wantPrefix, len(encoded), tc.budget, builder)
+			}
+			if tc.padding > 0 && len(encoded) != tc.budget {
+				t.Fatalf("padding: got %d bytes, want %d", len(encoded), tc.budget)
+			}
+			frames, err := readQUICFrames(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cryptoCount, pingCount int
+			for _, frame := range frames {
+				switch frame.FrameType() {
+				case clienthellod.QUICFrame_CRYPTO:
+					cryptoCount++
+				case clienthellod.QUICFrame_PING:
+					pingCount++
+				}
+			}
+			if cryptoCount != int(tc.cryptoCount) || pingCount != int(tc.pingCount) || cryptoBaseOffset(frames) != tc.base {
+				t.Fatalf("CRYPTO=%d, PING=%d, base=%d", cryptoCount, pingCount, cryptoBaseOffset(frames))
+			}
+			prefix, err := clienthellod.ReassembleCRYPTOFrames(frames)
+			if err != nil || !bytes.Equal(prefix, data[:tc.wantPrefix]) {
+				t.Fatalf("reassembled prefix=%x, error=%v", prefix, err)
+			}
+		})
+	}
+}
+
+func TestQUICRandomFramesBoundedLayoutRejectsNoProgress(t *testing.T) {
+	builder := QUICRandomFrames{MinCRYPTO: 70, MaxCRYPTO: 70, MinPING: 2, MaxPING: 2}
+	encoded, consumed, err := builder.buildAtWithLimit([]byte{42}, 0, 212)
+	if !errors.Is(err, errInitialFrameBudget) || consumed != 0 || encoded != nil {
+		t.Fatalf("encoded=%x, consumed=%d, error=%v", encoded, consumed, err)
+	}
+}
+
+func TestQUICRandomFramesBoundedLayoutKeepsNonEmptySplits(t *testing.T) {
+	builder := QUICRandomFrames{MinCRYPTO: 7, MaxCRYPTO: 7}
+	data := bytes.Repeat([]byte{42}, 4096)
+	copy(data, []byte{1, 0, 15, 252}) // Заголовок ClientHello с полным размером 4096.
+	for _, budget := range []int{5000, 100} {
+		for iteration := 0; iteration < 16; iteration++ {
+			encoded, consumed, err := builder.buildAtWithLimit(data, 0, budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if consumed < 7 {
+				t.Fatalf("fixture has no room for seven non-empty frames: %d", consumed)
+			}
+			frames, err := readQUICFrames(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, frame := range frames {
+				if crypto, ok := frame.(*clienthellod.CRYPTO); ok && crypto.Length == 0 {
+					reconstructor := clienthellod.NewQUICClientHelloReconstructor()
+					t.Fatalf("budget=%d prefix=%d empty CRYPTO at %d; collector: %v", budget, consumed, crypto.Offset, reconstructor.FromFrames(frames))
+				}
+			}
+		}
 	}
 }
 

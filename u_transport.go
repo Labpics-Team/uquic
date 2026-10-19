@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
@@ -34,11 +35,21 @@ func (t *UTransport) dial(ctx context.Context, addr net.Addr, host string, tlsCo
 	if err := validateConfig(conf); err != nil {
 		return nil, err
 	}
+	initialPacketSizeUnset := conf == nil || conf.InitialPacketSize == 0
 	conf = populateConfig(conf)
 
 	// [UQUIC]
-	// Override the default connection ID generator if the user has specified a length in QUICSpec.
 	if t.QUICSpec != nil {
+		minimum := t.QUICSpec.UDPDatagramMinSize
+		if minimum > protocol.MaxPacketBufferSize {
+			return nil, fmt.Errorf("QUIC Initial minimum datagram size %d exceeds maximum datagram budget %d", minimum, protocol.MaxPacketBufferSize)
+		}
+		// Увеличиваем только выбранный по умолчанию бюджет в копии конфигурации.
+		// Явный лимит вызывающего кода остаётся обязательным для упаковщика.
+		if initialPacketSizeUnset && minimum > int(conf.InitialPacketSize) {
+			conf.InitialPacketSize = uint16(minimum)
+		}
+		// Длину идентификатора соединения определяет профиль QUICSpec.
 		if t.QUICSpec.InitialPacketSpec.SrcConnIDLength != 0 {
 			t.ConnectionIDGenerator = &protocol.DefaultConnectionIDGenerator{ConnLen: t.QUICSpec.InitialPacketSpec.SrcConnIDLength}
 		} else {

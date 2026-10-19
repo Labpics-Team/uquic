@@ -16,9 +16,11 @@ type QUICSpec struct {
 	// for QUIC MUST include (utls).QUICTransportParametersExtension.
 	ClientHelloSpec *tls.ClientHelloSpec
 
-	// UDPDatagramMinSize specifies the minimum size of the UDP Datagram (UDP payload).
-	// If the UDP Datagram is smaller than this size, zeros will be padded to the end
-	// of the UDP Datagram until this size is reached.
+	// UDPDatagramMinSize задаёт минимальный размер полезной нагрузки UDP; недостающие байты
+	// дополняются нулями. Ноль означает DefaultUDPDatagramMinSize.
+	// Если Config.InitialPacketSize не задан, UTransport выбирает начальный
+	// бюджет не ниже этого размера. Явно заданный бюджет не увеличивается;
+	// несовместимый размер приводит к ошибке Dial или DialEarly.
 	UDPDatagramMinSize int
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	mrand "math/rand"
@@ -236,21 +237,30 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 // for multi-packet ClientHellos (the later Initial packets carry a non-zero
 // crypto-stream offset).
 func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payload []byte, err error) {
+	payload, _, err = qrf.buildAtWithLimit(cryptoData, baseOffset, math.MaxInt)
+	return payload, err
+}
+
+var errInitialFrameBudget = errors.New("QUIC Initial frame layout does not fit payload budget")
+
+// buildAtWithLimit сохраняет выбранные CRYPTO/PING и передаёт только помещающийся
+// префикс данных. Вызывающий код оставляет остаток в очереди до следующего пакета.
+func (qrf *QUICRandomFrames) buildAtWithLimit(cryptoData []byte, baseOffset uint64, maxSize int) (payload []byte, consumed int, err error) {
 	// check all bounds
 	if qrf.MinPING > qrf.MaxPING {
-		return nil, errors.New("MinPING must be less than or equal to MaxPING")
+		return nil, 0, errors.New("MinPING must be less than or equal to MaxPING")
 	}
 	if qrf.MinCRYPTO < 1 {
-		return nil, errors.New("MinCRYPTO must be at least 1")
+		return nil, 0, errors.New("MinCRYPTO must be at least 1")
 	}
 	if qrf.MinCRYPTO > qrf.MaxCRYPTO {
-		return nil, errors.New("MinCRYPTO must be less than or equal to MaxCRYPTO")
+		return nil, 0, errors.New("MinCRYPTO must be less than or equal to MaxCRYPTO")
 	}
 	if qrf.MinPADDING < 1 && qrf.Length != 0 {
-		return nil, errors.New("MinPADDING must be at least 1 if Length is not 0")
+		return nil, 0, errors.New("MinPADDING must be at least 1 if Length is not 0")
 	}
 	if qrf.MinPADDING > qrf.MaxPADDING && qrf.Length != 0 {
-		return nil, errors.New("MinPADDING must be less than or equal to MaxPADDING if Length is not 0")
+		return nil, 0, errors.New("MinPADDING must be less than or equal to MaxPADDING if Length is not 0")
 	}
 
 	var frameList QUICFrames = make([]QUICFrame, 0)
@@ -275,7 +285,7 @@ func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payl
 	// determine number of PING frames with crypto.rand
 	numPING, err := cryptoSafeRandUint64(uint64(qrf.MinPING), uint64(qrf.MaxPING))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// append PING frames
@@ -286,7 +296,7 @@ func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payl
 	// determine number of CRYPTO frames with crypto.rand
 	numCRYPTO, err := cryptoSafeRandUint64(uint64(qrf.MinCRYPTO), uint64(qrf.MaxCRYPTO))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	lenCryptoData := uint64(len(cryptoData))
@@ -301,7 +311,7 @@ func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payl
 		maxLenCRYPTO := subSat(lenCryptoData, numCRYPTO-i-2)
 		lenCRYPTO, err := cryptoSafeRandUint64(1, maxLenCRYPTO)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if lenCRYPTO > lenCryptoData {
 			lenCRYPTO = lenCryptoData // never read past the available crypto data
@@ -317,17 +327,62 @@ func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payl
 	// dry-run to determine the total length of all frames so far
 	dryrunPayload, err := frameList.Build(cryptoData)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	if len(dryrunPayload) > maxSize {
+		// Каждому выбранному CRYPTO оставляем по байту, пока данных хватает.
+		// Длины и смещения монотонны по размеру префикса; случайный выбор
+		// повторять не нужно, а пустые хвосты не заменяют непустое разбиение.
+		prefixFrames := make([]QUICFrameCrypto, len(frameList)-int(numPING))
+		prefixSize := func(n int) int {
+			size := int(numPING)
+			remaining, offset := n, baseOffset
+			for index, frame := range frameList[numPING:] {
+				crypto := frame.(QUICFrameCrypto)
+				length := crypto.Length
+				if length == 0 {
+					length = len(cryptoData) - int(uint64(crypto.Offset)-baseOffset)
+				}
+				length = min(length, remaining, max(1, remaining-(len(prefixFrames)-index-1)))
+				crypto = QUICFrameCrypto{Offset: int(offset), Length: length}
+				prefixFrames[index] = crypto
+				size += 1 + quicvarint.Len(uint64(crypto.Offset)) + quicvarint.Len(uint64(crypto.Length)) + crypto.Length
+				remaining -= length
+				offset += uint64(length)
+			}
+			return size
+		}
+		low, high := min(1, len(cryptoData)), len(cryptoData)
+		if prefixSize(low) > maxSize {
+			return nil, 0, fmt.Errorf("%w %d", errInitialFrameBudget, maxSize)
+		}
+		for low < high {
+			middle := low + (high-low+1)/2
+			if prefixSize(middle) <= maxSize {
+				low = middle
+			} else {
+				high = middle - 1
+			}
+		}
+		prefixSize(low)
+		for index, frame := range prefixFrames {
+			frameList[int(numPING)+index] = frame
+		}
+		cryptoData = cryptoData[:low]
+		dryrunPayload, err = frameList.Build(cryptoData)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	// determine length of PADDING frames to append
-	lenPADDINGsigned := int64(qrf.Length) - int64(len(dryrunPayload))
+	lenPADDINGsigned := int64(min(int(qrf.Length), maxSize)) - int64(len(dryrunPayload))
 	if lenPADDINGsigned > 0 {
 		lenPADDING := uint64(lenPADDINGsigned)
 		// determine number of PADDING frames to append
 		numPADDING, err := cryptoSafeRandUint64(uint64(qrf.MinPADDING), uint64(qrf.MaxPADDING))
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
 		for i := uint64(0); i < numPADDING-1; i++ { // select n-1 times, since the last one must be the remaining
@@ -338,7 +393,7 @@ func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payl
 			maxLenPADDING := subSat(lenPADDING, numPADDING-i-2)
 			lenPADDINGFrame, err := cryptoSafeRandUint64(1, maxLenPADDING)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			if lenPADDINGFrame > lenPADDING {
 				lenPADDINGFrame = lenPADDING
@@ -357,7 +412,8 @@ func (qrf *QUICRandomFrames) BuildAt(cryptoData []byte, baseOffset uint64) (payl
 	})
 
 	// build the payload
-	return frameList.Build(cryptoData)
+	payload, err = frameList.Build(cryptoData)
+	return payload, len(cryptoData), err
 }
 
 // subSat returns a-b, saturating at 0 instead of wrapping when b > a. Used to
