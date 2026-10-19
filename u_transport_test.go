@@ -131,6 +131,40 @@ func TestUTransportInitialDatagramBudget(t *testing.T) {
 	}
 }
 
+func TestUTransportCustomMinimumDatagramSize(t *testing.T) {
+	require.Less(t, protocol.InitialPacketSize, protocol.MaxPacketBufferSize)
+	for _, tc := range []struct {
+		name        string
+		early       bool
+		emptyConfig bool
+	}{
+		{name: "dial_nil"},
+		{name: "dial_empty", emptyConfig: true},
+		{name: "dial_early_nil", early: true},
+		{name: "dial_early_empty", early: true, emptyConfig: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for minimum := protocol.InitialPacketSize + 1; minimum <= protocol.MaxPacketBufferSize; minimum++ {
+				t.Run(fmt.Sprint(minimum), func(t *testing.T) {
+					spec, err := QUICID2Spec(QUICFirefox_116A)
+					require.NoError(t, err)
+					spec.UDPDatagramMinSize = minimum
+					var conf, originalConfig *Config
+					if tc.emptyConfig {
+						conf = &Config{}
+						originalConfig = conf.Clone()
+					}
+					size, err := dialUTransportInitial(t, &spec, conf, tc.early)
+					require.NoError(t, err)
+					require.Equal(t, minimum, size)
+					require.Equal(t, originalConfig, conf, "нормализация изменила конфигурацию вызывающего кода")
+					require.Equal(t, minimum, spec.UDPDatagramMinSize, "вызов изменил общий профиль")
+				})
+			}
+		})
+	}
+}
+
 func TestUTransportRejectsUnsupportedInitialDatagramSize(t *testing.T) {
 	for _, minimum := range []int{protocol.MaxPacketBufferSize + 1, (1 << 16) + 1357} {
 		t.Run(fmt.Sprint(minimum), func(t *testing.T) {
