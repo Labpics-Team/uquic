@@ -56,7 +56,7 @@ func initialFrames(t *testing.T, packet *coalescedPacket) (*wire.ExtendedHeader,
 	return extended, frames
 }
 
-// Размер проверяется по сериализованной датаграмме, данные — независимым parser.
+// Размер проверяется по сериализованной датаграмме, данные — независимым разборщиком.
 // Все фрагменты ClientHello должны дойти, а номер пакета расходуется ровно один раз.
 func TestUInitialFlightFitsDatagramBudget(t *testing.T) {
 	for _, budget := range []protocol.ByteCount{1200, 1280, 1452} {
@@ -136,7 +136,7 @@ func TestUInitialLawfulProfileFitsDatagramBudget(t *testing.T) {
 	}
 }
 
-// Повтор CRYPTO в PTO обязан соблюдать тот же предел и сохранять абсолютный offset.
+// Повтор CRYPTO в PTO обязан соблюдать тот же предел и сохранять абсолютное смещение.
 func TestUInitialPTOFitsDatagramBudget(t *testing.T) {
 	tp, packer := newTestUPacketPacker(t)
 	original := bytes.Repeat([]byte{42}, 3000)
@@ -302,8 +302,8 @@ func TestUInitialCoalescedShortHeaderHasNoExternalPadding(t *testing.T) {
 			require.NoError(t, err)
 			aead, err := cipher.NewGCM(block)
 			require.NoError(t, err)
-			// Для единственного пакета каждого случая используем фиксированный nonce.
-			// Заголовок остаётся открытым, но AEAD аутентифицирует и его, и payload.
+			// Для единственного пакета каждого случая фиксируем одноразовое значение AEAD.
+			// Заголовок остаётся открытым, но AEAD аутентифицирует и его, и полезную нагрузку.
 			nonce := make([]byte, aead.NonceSize())
 			tp, packer := newTestUPacketPacker(t, func(tp *testPacketPacker, ctrl *gomock.Controller) {
 				sealer := mocks.NewMockShortHeaderSealer(ctrl)
@@ -346,7 +346,7 @@ func TestUInitialCoalescedShortHeaderHasNoExternalPadding(t *testing.T) {
 				require.Greater(t, len(plaintext), 2)
 			} else {
 				require.GreaterOrEqual(t, len(initial), 1200)
-				// Для header protection нужны четыре байта PN + plaintext:
+				// Для защиты заголовка нужны четыре байта номера пакета и открытого текста:
 				// два байта PN, один PADDING и один PING; дополнение до 1200 не нужно.
 				require.Equal(t, []byte{0, 1}, plaintext)
 			}
@@ -419,8 +419,8 @@ func TestUInitialLargeACKPreservesCRYPTO(t *testing.T) {
 				// Одного байта с 16 заголовками здесь недостаточно для прогресса.
 				require.Len(t, frames, 1)
 			} else {
-				// clienthellod не разбирает ACK; штатный parser уже отделил
-				// CRYPTO, которые собираем в порядке абсолютных offsets.
+				// clienthellod не разбирает ACK; штатный разборщик уже отделил
+				// CRYPTO, которые собираем в порядке абсолютных смещений.
 				var cryptoFrames []*wire.CryptoFrame
 				for _, frame := range frames {
 					if crypto, ok := frame.(*wire.CryptoFrame); ok {

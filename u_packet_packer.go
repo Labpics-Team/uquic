@@ -173,8 +173,8 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 	} else if oneRTTPayload.length > 0 {
 		var padding protocol.ByteCount
 		if initialData != nil {
-			// Короткий заголовок занимает остаток датаграммы: padding должен
-			// войти в шифруемый пакет, иначе изменится его authentication tag.
+			// Короткий заголовок занимает остаток датаграммы: дополнение должно
+			// войти в шифруемый пакет, иначе изменится его тег аутентификации.
 			padding = max(0, p.initialDatagramMinSize()-size)
 		}
 		shp, err := p.appendShortHeaderPacket(buffer, connID, oneRTTPacketNumber, oneRTTPacketNumberLen, kp, oneRTTPayload, padding, maxSize, oneRTTSealer, false, v)
@@ -231,7 +231,7 @@ func (p *uPacketPacker) prepareInitialPacket(maxSize protocol.ByteCount, overhea
 	if err != nil {
 		return nil, payload{}, nil, err
 	}
-	// Header protection требует минимум четыре байта PN + plaintext.
+	// Защита заголовка требует минимум четыре байта номера пакета и открытого текста.
 	for len(data)+int(hdr.PacketNumberLen) < 4 {
 		data = append(data, 0)
 	}
@@ -287,8 +287,8 @@ func (p *uPacketPacker) initialDatagramMinSize() protocol.ByteCount {
 }
 
 func (p *uPacketPacker) padInitialDatagram(buffer *packetBuffer) {
-	// UDP padding находится после всех длинных пакетов, чтобы не скрыть
-	// следующий coalesced packet от parser получателя.
+	// Дополнение UDP находится после всех длинных пакетов, чтобы получатель
+	// мог разобрать следующий пакет в той же датаграмме.
 	if padding := p.initialDatagramMinSize() - buffer.Len(); padding > 0 {
 		buffer.Data = append(buffer.Data, make([]byte, padding)...)
 	}
@@ -498,7 +498,7 @@ func (p *uPacketPacker) MaybePackPTOProbePacket(
 	size := p.longHeaderPacketLength(hdr, pl, v) + protocol.ByteCount(sealer.Overhead())
 	var padding protocol.ByteCount
 	if encLevel == protocol.EncryptionInitial {
-		if initialData == nil { // default behavior
+		if initialData == nil { // Обычная упаковка без заданной раскладки.
 			padding = p.initialPaddingLen(pl.frames, size, maxPacketSize)
 		} else { // otherwise we resend the spec-based initial packet
 			initPkt, err := p.appendInitialPacket(buffer, hdr, pl, initialData, protocol.EncryptionInitial, sealer, v)

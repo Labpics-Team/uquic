@@ -331,7 +331,7 @@ func (qrf *QUICRandomFrames) buildAtWithLimit(cryptoData []byte, baseOffset uint
 	}
 	if len(dryrunPayload) > maxSize {
 		// Каждому выбранному CRYPTO оставляем по байту, пока данных хватает.
-		// Длины и offsets монотонны по размеру префикса; случайный выбор
+		// Длины и смещения монотонны по размеру префикса; случайный выбор
 		// повторять не нужно, а пустые хвосты не заменяют непустое разбиение.
 		prefixFrames := make([]QUICFrameCrypto, len(frameList)-int(numPING))
 		prefixSize := func(n int) int {

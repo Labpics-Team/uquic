@@ -45,11 +45,11 @@ func (t *UTransport) dial(ctx context.Context, addr net.Addr, host string, tlsCo
 			return nil, fmt.Errorf("QUIC Initial minimum datagram size %d exceeds maximum datagram budget %d", minimum, protocol.MaxPacketBufferSize)
 		}
 		// Увеличиваем только выбранный по умолчанию бюджет в копии конфигурации.
-		// Явный лимит вызывающего кода остаётся обязательным для packer.
+		// Явный лимит вызывающего кода остаётся обязательным для упаковщика.
 		if initialPacketSizeUnset && minimum > int(conf.InitialPacketSize) {
 			conf.InitialPacketSize = uint16(minimum)
 		}
-		// Override the default connection ID generator if the user has specified a length in QUICSpec.
+		// Длину идентификатора соединения определяет профиль QUICSpec.
 		if t.QUICSpec.InitialPacketSpec.SrcConnIDLength != 0 {
 			t.ConnectionIDGenerator = &protocol.DefaultConnectionIDGenerator{ConnLen: t.QUICSpec.InitialPacketSpec.SrcConnIDLength}
 		} else {

@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Получатель наблюдает фактическую UDP-датаграмму. TLS handshake не завершается:
-// после первого Initial вызов отменяется, обе фоновые goroutine завершаются.
+// Получатель наблюдает фактическую UDP-датаграмму. Рукопожатие TLS не завершается:
+// после первого Initial вызов отменяется, обе фоновые горутины завершаются.
 func dialUTransportInitial(t *testing.T, spec *QUICSpec, conf *Config, early bool) (int, error) {
 	t.Helper()
 	server := newUPDConnLocalhost(t)
