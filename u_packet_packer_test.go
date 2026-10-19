@@ -2,6 +2,8 @@ package quic
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"fmt"
 	"sort"
 	"testing"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/refraction-networking/clienthellod"
 	"github.com/refraction-networking/uquic/internal/handshake"
+	"github.com/refraction-networking/uquic/internal/mocks"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
 	"github.com/stretchr/testify/require"
@@ -287,33 +290,68 @@ func TestUInitialPTOOnlyPing(t *testing.T) {
 }
 
 func TestUInitialCoalescedShortHeaderHasNoExternalPadding(t *testing.T) {
-	tp, packer := newTestUPacketPacker(t, func(tp *testPacketPacker, ctrl *gomock.Controller) {
-		tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealerWithOverhead(ctrl, 16), nil).AnyTimes()
-		tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(12), protocol.PacketNumberLen2)
-		tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(12))
-		tp.framer.EXPECT().HasData().Return(false)
-	})
-	packer.uSpec.InitialPacketSpec.FrameBuilder.(*QUICRandomFrames).Length = 0
-	_, err := tp.initialStream.Write([]byte("initial"))
-	require.NoError(t, err)
-	tp.retransmissionQueue.AddPing(protocol.Encryption1RTT)
-	packet, err := packer.PackCoalescedPacket(false, 1280, time.Now(), protocol.Version1)
-	require.NoError(t, err)
-	require.NotNil(t, packet)
-	defer packet.buffer.Release()
-	require.NotNil(t, packet.shortHdrPacket)
-	require.Equal(t, protocol.ByteCount(1200), packet.buffer.Len())
-	_, _, remaining, err := wire.ParsePacket(packet.buffer.Data)
-	require.NoError(t, err)
-	require.Equal(t, int(packet.shortHdrPacket.Length), len(remaining))
-	// Mock sealer оставляет 16 байт tag; внешний padding изменил бы хвост.
-	require.Equal(t, bytes.Repeat([]byte{'s'}, 16), remaining[len(remaining)-16:])
-	headerLength, number, _, _, err := wire.ParseShortHeader(remaining, testPackerConnIDLen)
-	require.NoError(t, err)
-	require.Equal(t, protocol.PacketNumber(12), number)
-	_, frame, err := wire.NewFrameParser(false).ParseNext(remaining[headerLength:len(remaining)-16], protocol.Encryption1RTT, protocol.Version1)
-	require.NoError(t, err)
-	require.IsType(t, &wire.PingFrame{}, frame)
+	for _, tc := range []struct {
+		name          string
+		initialLength uint16
+	}{
+		{name: "initial_requires_padding"},
+		{name: "initial_already_large", initialLength: 1215},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block, err := aes.NewCipher(make([]byte, 16))
+			require.NoError(t, err)
+			aead, err := cipher.NewGCM(block)
+			require.NoError(t, err)
+			// Для единственного пакета каждого случая используем фиксированный nonce.
+			// Заголовок остаётся открытым, но AEAD аутентифицирует и его, и payload.
+			nonce := make([]byte, aead.NonceSize())
+			tp, packer := newTestUPacketPacker(t, func(tp *testPacketPacker, ctrl *gomock.Controller) {
+				sealer := mocks.NewMockShortHeaderSealer(ctrl)
+				sealer.EXPECT().KeyPhase().Return(protocol.KeyPhaseOne).AnyTimes()
+				sealer.EXPECT().Overhead().Return(aead.Overhead()).AnyTimes()
+				sealer.EXPECT().EncryptHeader(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+				sealer.EXPECT().Seal(gomock.Any(), gomock.Any(), protocol.PacketNumber(12), gomock.Any()).DoAndReturn(func(dst, src []byte, _ protocol.PacketNumber, ad []byte) []byte {
+					return aead.Seal(dst, nonce, src, ad)
+				})
+				tp.sealingManager.EXPECT().Get1RTTSealer().Return(sealer, nil).AnyTimes()
+				tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(12), protocol.PacketNumberLen2)
+				tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(12))
+				tp.framer.EXPECT().HasData().Return(false)
+			})
+			packer.uSpec.InitialPacketSpec.FrameBuilder.(*QUICRandomFrames).Length = tc.initialLength
+			_, err = tp.initialStream.Write([]byte("initial"))
+			require.NoError(t, err)
+			tp.retransmissionQueue.AddPing(protocol.Encryption1RTT)
+			packet, err := packer.PackCoalescedPacket(false, 1452, time.Now(), protocol.Version1)
+			require.NoError(t, err)
+			require.NotNil(t, packet)
+			defer packet.buffer.Release()
+			require.NotNil(t, packet.shortHdrPacket)
+			require.LessOrEqual(t, packet.buffer.Len(), protocol.ByteCount(1452))
+			_, initial, remaining, err := wire.ParsePacket(packet.buffer.Data)
+			require.NoError(t, err)
+			require.Equal(t, int(packet.shortHdrPacket.Length), len(remaining))
+			headerLength, number, _, _, err := wire.ParseShortHeader(remaining, testPackerConnIDLen)
+			require.NoError(t, err)
+			require.Equal(t, protocol.PacketNumber(12), number)
+			plaintext, err := aead.Open(nil, nonce, remaining[headerLength:], remaining[:headerLength])
+			require.NoError(t, err, "весь 1-RTT ciphertext, включая padding, должен проходить аутентификацию")
+			n, frame, err := wire.NewFrameParser(false).ParseNext(plaintext, protocol.Encryption1RTT, protocol.Version1)
+			require.NoError(t, err)
+			require.IsType(t, &wire.PingFrame{}, frame)
+			require.Equal(t, len(plaintext), n)
+			if tc.initialLength == 0 {
+				require.Less(t, len(initial), 1200)
+				require.Equal(t, protocol.ByteCount(1200), packet.buffer.Len())
+				require.Greater(t, len(plaintext), 2)
+			} else {
+				require.GreaterOrEqual(t, len(initial), 1200)
+				// Для header protection нужны четыре байта PN + plaintext:
+				// два байта PN, один PADDING и один PING; дополнение до 1200 не нужно.
+				require.Equal(t, []byte{0, 1}, plaintext)
+			}
+		})
+	}
 }
 
 func TestUInitialCoalescedHandshakeRemainsReadable(t *testing.T) {
