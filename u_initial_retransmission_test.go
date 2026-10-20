@@ -161,16 +161,22 @@ func TestUInitialRetryAfterPTOReordersFrames(t *testing.T) {
 			sent.ResetForRetry(now)
 			packer.SetToken(make([]byte, 128))
 			t.Logf("реальная очередь после Retry: %s", rcaQueueRanges(tp.retransmissionQueue))
-			for flight := 0; tp.retransmissionQueue.HasInitialData() && flight < 8; flight++ {
+			retryPackets := 0
+			for tp.retransmissionQueue.HasInitialData() && retryPackets < 8 {
 				packet, err := packer.PackCoalescedPacket(false, 1200, now, protocol.Version1)
 				if err != nil {
 					t.Fatalf("повтор после Retry оборвал соединение: %v; queue=%s", err, rcaQueueRanges(tp.retransmissionQueue))
 				}
 				register(packet)
 				rcaObserveInitial(t, packet, want, seen)
+				retryPackets++
 			}
 			if tp.retransmissionQueue.HasInitialData() || len(seen) != len(want) {
 				t.Fatalf("после Retry CRYPTO потеряны: seen=%d want=%d queue=%s", len(seen), len(want), rcaQueueRanges(tp.retransmissionQueue))
+			}
+			// В этой фикстуре 1500 байт помещаются в два Initial и с токеном 128 байт.
+			if retryPackets != initialPackets {
+				t.Fatalf("повтор после Retry занял %d Initial-пакетов вместо %d", retryPackets, initialPackets)
 			}
 		})
 	}
