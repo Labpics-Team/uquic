@@ -3,6 +3,7 @@ package quic
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/refraction-networking/clienthellod"
@@ -207,6 +208,23 @@ func (p *uPacketPacker) prepareInitialPacket(maxSize protocol.ByteCount, overhea
 		copy := *frame
 		queue.initialCryptoData[index] = &copy
 	}
+	// Потеря и Retry возвращают CRYPTO в порядке пакетов, а не смещений.
+	// Раскладка принимает один непрерывный диапазон: разрывы и перекрытия
+	// оставляем следующим пакетам, не заполняя их выдуманными байтами.
+	var deferredCrypto []*wire.CryptoFrame
+	if !onlyAck && len(queue.initialCryptoData) > 1 {
+		sort.Slice(queue.initialCryptoData, func(i, j int) bool {
+			return queue.initialCryptoData[i].Offset < queue.initialCryptoData[j].Offset
+		})
+		end := queue.initialCryptoData[0].Offset + protocol.ByteCount(len(queue.initialCryptoData[0].Data))
+		count := 1
+		for count < len(queue.initialCryptoData) && queue.initialCryptoData[count].Offset == end {
+			end += protocol.ByteCount(len(queue.initialCryptoData[count].Data))
+			count++
+		}
+		deferredCrypto = queue.initialCryptoData[count:]
+		queue.initialCryptoData = queue.initialCryptoData[:count:count]
+	}
 	staged.initialStream = &stream
 	staged.retransmissionQueue = &queue
 	hdr, pl := staged.maybeGetCryptoPacket(maxSize-protocol.ByteCount(overhead), protocol.EncryptionInitial, now, onlyAck, true, v)
@@ -271,6 +289,7 @@ func (p *uPacketPacker) prepareInitialPacket(maxSize protocol.ByteCount, overhea
 	if len(unsent) > 0 {
 		queue.initialCryptoData = append(unsent, queue.initialCryptoData...)
 	}
+	queue.initialCryptoData = append(queue.initialCryptoData, deferredCrypto...)
 	p.retransmissionQueue.initialCryptoData = queue.initialCryptoData
 	if len(pl.frames) == 0 {
 		// ACK без CRYPTO использует обычное дополнение Initial-пакета.
