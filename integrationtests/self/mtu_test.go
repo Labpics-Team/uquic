@@ -15,6 +15,7 @@ import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/logging"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -116,9 +117,15 @@ func TestPathMTUDiscovery(t *testing.T) {
 		getQuicConfig(&quic.Config{
 			InitialPacketSize: protocol.MinInitialPacketSize,
 			EnableDatagrams:   true,
+			// Keep discovery active if the echo finishes before its probes do.
+			KeepAlivePeriod: rtt,
 			Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
 				return &logging.ConnectionTracer{
-					UpdatedMTU: func(mtu logging.ByteCount, _ bool) { mtus = append(mtus, mtu) },
+					UpdatedMTU: func(mtu logging.ByteCount, _ bool) {
+						mx.Lock()
+						defer mx.Unlock()
+						mtus = append(mtus, mtu)
+					},
 				}
 			},
 		}),
@@ -162,35 +169,44 @@ func TestPathMTUDiscovery(t *testing.T) {
 		t.Fatal("timeout")
 	}
 
-	err = conn.SendDatagram(make([]byte, 2000))
-	require.Error(t, err)
-	require.ErrorAs(t, err, &datagramErr)
-	finalMaxDatagramSize := datagramErr.MaxDatagramPayloadSize
-	require.Equal(t, int(finalMaxDatagramSize), conn.ConnectionState().MaxDatagramPayloadSize)
-
-	mx.Lock()
-	defer mx.Unlock()
-	require.NotEmpty(t, mtus)
-
-	maxPacketSizeClient := int(mtus[len(mtus)-1])
-	t.Logf("max client packet size: %d, MTU: %d", maxPacketSizeClient, mtu)
-	t.Logf("max datagram size: initial: %d, final: %d", initialMaxDatagramSize, finalMaxDatagramSize)
-	t.Logf("max server packet size: %d, MTU: %d", maxPacketSizeServer, mtu)
-
-	require.GreaterOrEqual(t, maxPacketSizeClient, mtu-25)
 	const maxDiff = 44 // maximum short header, encryption tag, and DATAGRAM framing overhead
 	require.GreaterOrEqual(t, int(initialMaxDatagramSize), protocol.MinInitialPacketSize-maxDiff)
-	require.GreaterOrEqual(t, int(finalMaxDatagramSize), maxPacketSizeClient-maxDiff)
-	// MTU discovery was disabled on the server side
-	require.Equal(t, 1234, maxPacketSizeServer)
 
-	var numPacketsLargerThanDiscoveredMTU int
-	for _, s := range clientPacketSizes {
-		if s > maxPacketSizeClient {
-			numPacketsLargerThanDiscoveredMTU++
+	var maxPacketSizeClient, finalMaxPacketSizeServer int
+	var finalMaxDatagramSize int64
+	// Stream completion and MTU convergence are independent. Check one
+	// synchronized observation; the tracer and proxy keep running until cleanup.
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		mx.Lock()
+		defer mx.Unlock()
+		require.NotEmpty(collect, mtus)
+
+		maxPacketSizeClient = int(mtus[len(mtus)-1])
+		require.GreaterOrEqual(collect, maxPacketSizeClient, mtu-25)
+
+		err := conn.SendDatagram(make([]byte, 2000))
+		require.Error(collect, err)
+		var datagramErr *quic.DatagramTooLargeError
+		require.ErrorAs(collect, err, &datagramErr)
+		finalMaxDatagramSize = datagramErr.MaxDatagramPayloadSize
+		require.Equal(collect, int(finalMaxDatagramSize), conn.ConnectionState().MaxDatagramPayloadSize)
+		require.GreaterOrEqual(collect, int(finalMaxDatagramSize), maxPacketSizeClient-maxDiff)
+
+		// MTU discovery was disabled on the server side.
+		require.Equal(collect, 1234, maxPacketSizeServer)
+
+		var numPacketsLargerThanDiscoveredMTU int
+		for _, s := range clientPacketSizes {
+			if s > maxPacketSizeClient {
+				numPacketsLargerThanDiscoveredMTU++
+			}
 		}
-	}
-	// The client shouldn't have sent any packets larger than the MTU it discovered,
-	// except for at most one MTU probe packet.
-	require.LessOrEqual(t, numPacketsLargerThanDiscoveredMTU, 1)
+		// Except for at most one probe, packets must fit the discovered MTU.
+		require.LessOrEqual(collect, numPacketsLargerThanDiscoveredMTU, 1)
+		finalMaxPacketSizeServer = maxPacketSizeServer
+	}, scaleDuration(20*time.Second), rtt, "MTU discovery did not converge")
+
+	t.Logf("max client packet size: %d, MTU: %d", maxPacketSizeClient, mtu)
+	t.Logf("max datagram size: initial: %d, final: %d", initialMaxDatagramSize, finalMaxDatagramSize)
+	t.Logf("max server packet size: %d, MTU: %d", finalMaxPacketSizeServer, mtu)
 }
