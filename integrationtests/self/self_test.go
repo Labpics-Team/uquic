@@ -171,7 +171,24 @@ func areHandshakesRunning() bool {
 func areTransportsRunning() bool {
 	var b bytes.Buffer
 	pprof.Lookup("goroutine").WriteTo(&b, 1)
-	return strings.Contains(b.String(), "quic-go.(*Transport).listen")
+	return strings.Contains(b.String(), "uquic.(*Transport).listen") // [uQUIC]
+}
+
+func TestTransportLeakDetector(t *testing.T) {
+	// The detector observes the process, so keep this control non-parallel.
+	wait := scaleDuration(time.Second)
+	tick := scaleDuration(time.Millisecond)
+	idle := func() bool { return !areTransportsRunning() }
+	require.Eventually(t, idle, wait, tick, "transport listener already running before control")
+
+	transport := &quic.Transport{Conn: newUPDConnLocalhost(t)}
+	t.Cleanup(func() { require.NoError(t, transport.Close()) })
+	_, err := transport.Listen(getTLSConfig(), getQuicConfig(nil))
+	require.NoError(t, err)
+	require.Eventually(t, areTransportsRunning, wait, tick, "live transport listener was not detected")
+
+	require.NoError(t, transport.Close())
+	require.Eventually(t, idle, wait, tick, "closed transport listener is still reported")
 }
 
 func TestMain(m *testing.M) {
