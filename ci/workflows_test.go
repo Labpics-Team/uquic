@@ -126,6 +126,7 @@ steps:
   - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
     with:
       go-version: '1.26.x'
+      check-latest: true
   - name: Reject reachable vulnerabilities
     run: |
       set -euo pipefail
