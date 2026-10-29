@@ -155,14 +155,6 @@ jobs:
       - name: Проверить протокол
         if: success() || failure()
         run: go test ${{ env.RACEFLAG }} -v -timeout 5m -shuffle=on ./integrationtests/self -version=${{ matrix.version }} ${{ env.QLOGFLAG }}
-      - name: Сохранить qlog
-        if: ${{ always() && env.DEBUG == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: qlogs-self-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}-${{ matrix.mode }}
-          path: integrationtests/self/*.qlog
-          retention-days: 7
-
   ancillary:
     strategy:
       fail-fast: false
@@ -220,14 +212,6 @@ jobs:
         run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/tools/...
       - name: Проверить согласование версии
         run: go test ${{ env.RACEFLAG }} -v -timeout 30s -shuffle=on ./integrationtests/versionnegotiation ${{ env.QLOGFLAG }}
-      - name: Сохранить qlog
-        if: ${{ always() && env.DEBUG == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: qlogs-ancillary-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}
-          path: integrationtests/versionnegotiation/*.qlog
-          retention-days: 7
-
   benchmarks:
     strategy:
       fail-fast: false
@@ -279,14 +263,6 @@ jobs:
       - run: go version
       - name: Измерить производительность
         run: go test -v -run=^$ -timeout 5m -shuffle=on -bench=. ./integrationtests/self
-      - name: Сохранить qlog
-        if: ${{ always() && env.DEBUG == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: qlogs-benchmarks-${{ matrix.os }}-go${{ matrix.go }}-race${{ matrix.race }}${{ matrix.use32bit && '-32bit' || '' }}
-          path: integrationtests/self/*.qlog
-          retention-days: 7
-
   gate:
     name: Интеграционные проверки
     needs: [integration, ancillary, benchmarks]
