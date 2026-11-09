@@ -1,11 +1,3 @@
-vulnerabilities:
-  - id: GO-2026-5932
-    purls:
-      - pkg:golang/golang.org/x/crypto@v0.58.0
-    statement: >-
-      Исправления нет: пакет golang.org/x/crypto/openpgp заброшен целиком. Модуль его не
-      импортирует: job openpgp в CI падает, если пакет появится в go list -deps -test
-      любой платформы со своим кодом.
 misconfigurations:
   - id: DS-0002
     paths:
