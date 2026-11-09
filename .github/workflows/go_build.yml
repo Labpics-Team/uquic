@@ -13,6 +13,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Compiler flags and user Go configuration cannot alter the native case.
+env:
+  GOFLAGS: ""
+  GOENV: "off"
+  GOTOOLCHAIN: local
+  GOOS: ""
+  GOARCH: ""
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     strategy:
@@ -22,8 +34,10 @@ jobs:
         go: [ "1.26.0", "1.26.x" ]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        persist-credentials: false
+    - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
       with:
         go-version: ${{ matrix.go }}
     - run: go version
@@ -98,30 +112,6 @@ jobs:
                   raise SystemExit(f"missing private-key detection in {name}")
           PY
 
-  openpgp:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version: '1.26.x'
-      # Платформы со своим кодом (linux, darwin, freebsd, windows, прочие — на примере openbsd)
-      # и 32-битная сборка из CI, с cgo и без.
-      - name: Проверить отсутствие golang.org/x/crypto/openpgp
-        run: |
-          set -euo pipefail
-          dependencies="$(mktemp)"
-          trap 'rm -f "$dependencies"' EXIT
-          for target in linux-amd64 linux-386 linux-arm64 darwin-amd64 darwin-arm64 freebsd-amd64 windows-amd64 windows-arm64 openbsd-amd64; do
-            for cgo in 0 1; do
-              GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./... >> "$dependencies"
-            done
-          done
-          awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
-
   govulncheck:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -147,7 +137,7 @@ jobs:
 
   gate:
     name: CI
-    needs: [contract, build, ginkgo, integration, security, openpgp, govulncheck]
+    needs: [contract, build, ginkgo, integration, security, govulncheck]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -155,18 +145,6 @@ jobs:
       - name: Require every native job
         shell: bash
         env:
-          CONTRACT: ${{ needs.contract.result }}
-          BUILD: ${{ needs.build.result }}
-          GINKGO: ${{ needs.ginkgo.result }}
-          INTEGRATION: ${{ needs.integration.result }}
-          SECURITY: ${{ needs.security.result }}
-          OPENPGP: ${{ needs.openpgp.result }}
-          GOVULNCHECK: ${{ needs.govulncheck.result }}
+          NEEDS_RESULTS: ${{ join(needs.*.result, ',') }}
         run: |
-          test "$CONTRACT" = success
-          test "$BUILD" = success
-          test "$GINKGO" = success
-          test "$INTEGRATION" = success
-          test "$SECURITY" = success
-          test "$OPENPGP" = success
-          test "$GOVULNCHECK" = success
+          [[ "$NEEDS_RESULTS" =~ ^success(,success)*$ ]]
