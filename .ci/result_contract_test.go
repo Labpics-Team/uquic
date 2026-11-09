@@ -78,16 +78,32 @@ func TestWorkflowPropertiesAllowEquivalentEdits(t *testing.T) {
 func TestYAMLReusePreservesValueChecks(t *testing.T) {
 	files := workflows(t)
 	raw := strings.ReplaceAll(string(files["go_build.yml"]), "\r\n", "\n")
-	raw = strings.Replace(raw, `name: "Go Build"`, `name: &title "Go Build"`, 1)
-	raw = strings.Replace(raw, "    - name: Build", "    - name: *title", 1)
+	replace := func(source, old, replacement string) string {
+		t.Helper()
+		changed := strings.Replace(source, old, replacement, 1)
+		if changed == source {
+			t.Fatalf("YAML reuse scenario did not apply: %q", old)
+		}
+		return changed
+	}
+	raw = replace(raw, `name: "Go Build"`, `name: &title "Go Build"`)
+	raw = replace(raw, "    - name: Build", "    - name: *title")
 	files["go_build.yml"] = []byte(raw)
 	if err := validate(files); err != nil {
 		t.Fatal(err)
 	}
-	raw = strings.Replace(raw, "  build:\n", "  build:\n    continue-on-error: &ignored true\n", 1)
+	raw = replace(raw, "env:\n", "env:\n  CI_ALIAS_IGNORE: &ignored '${{ true }}'\n")
+	raw = replace(raw, "  build:\n", "  build:\n    continue-on-error: *ignored\n")
 	files["go_build.yml"] = []byte(raw)
+	workflow, err := parse(files["go_build.yml"])
+	if err != nil {
+		t.Fatalf("alias scenario must be valid YAML: %v", err)
+	}
+	if workflowJobs(workflow)["build"].(map[string]any)["continue-on-error"] != "${{ true }}" {
+		t.Fatal("alias did not resolve to ignored failure")
+	}
 	if validate(files) == nil {
-		t.Fatal("anchored ignored failure accepted")
+		t.Fatal("ignored failure through alias accepted")
 	}
 }
 
