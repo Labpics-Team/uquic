@@ -41,6 +41,45 @@ func TestCompleteResultExecutesOutcomePolicy(t *testing.T) {
 	}
 }
 
+func TestResultAdmissionRunsAfterFailuresAndCancelsWithWorkflow(t *testing.T) {
+	for _, file := range []string{"go_build.yml", "integration.yml"} {
+		for _, tc := range []struct {
+			condition any
+			accepted  bool
+		}{
+			{"${{ !cancelled() }}", true},
+			{"!cancelled()", true},
+			{"${{ always() && ! cancelled() }}", true},
+			{"${{ !cancelled() && always() }}", true},
+			{"${{ always ( ) && ! cancelled ( ) }}", true},
+			{nil, false},
+			{true, false},
+			{"${{ always() }}", false},
+			{"${{ success() }}", false},
+			{"${{ !cancelled() && success() }}", false},
+			{"${{ !cancelled() || always() }}", false},
+			{"${{ !cancelled() && github.ref == 'refs/heads/main' }}", false},
+			{"${{ !cancelled()", false},
+			{"!cancelled() }}", false},
+			{"${{ !can celled() }}", false},
+		} {
+			files := workflows(t)
+			workflow, err := parse(files[file])
+			if err != nil {
+				t.Fatal(err)
+			}
+			workflowJobs(workflow)["gate"].(map[string]any)["if"] = tc.condition
+			files[file], err = yaml.Marshal(workflow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validate(files); (err == nil) != tc.accepted {
+				t.Fatalf("%s result admission %v: %v", file, tc.condition, err)
+			}
+		}
+	}
+}
+
 func TestWorkflowPropertiesAllowEquivalentEdits(t *testing.T) {
 	files := workflows(t)
 	for file, raw := range files {

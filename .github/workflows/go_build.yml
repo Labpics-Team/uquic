@@ -142,7 +142,7 @@ jobs:
   gate:
     name: CI
     needs: [contract, build, ginkgo, integration, security, govulncheck]
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
