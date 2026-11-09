@@ -11,6 +11,7 @@ import (
 )
 
 var immutableAction = regexp.MustCompile(`^[^@]+@[0-9a-f]{40}$`)
+var cancelableResultCondition = regexp.MustCompile(`^(?:always\s*\(\s*\)\s*&&\s*)?!\s*cancelled\s*\(\s*\)(?:\s*&&\s*always\s*\(\s*\))?$`)
 var nativeGoEnvironment = map[string]string{
 	"GOFLAGS": "", "GOENV": "off", "GOTOOLCHAIN": "local", "GOOS": "", "GOARCH": "",
 }
@@ -71,6 +72,23 @@ func preservesFailure(value any) bool {
 // prove that required work executes; this check does not evaluate expressions.
 func requiredStepAdmission(value any) bool {
 	return value == nil || value == true || value == "success()" || value == "${{ success() }}" || value == "${{ true }}"
+}
+
+// These documented forms execute after failures and stop with workflow cancellation.
+// Extra conditions can skip a required result; this does not evaluate expressions.
+func cancelableResultAdmission(value any) bool {
+	expression, ok := value.(string)
+	if !ok {
+		return false
+	}
+	expression = strings.TrimSpace(expression)
+	if strings.HasPrefix(expression, "${{") {
+		if !strings.HasSuffix(expression, "}}") {
+			return false
+		}
+		expression = strings.TrimSpace(expression[3 : len(expression)-2])
+	}
+	return cancelableResultCondition.MatchString(expression)
 }
 
 func requiredConsumer(script string) bool {
@@ -164,8 +182,8 @@ func resultGraph(workflow map[string]any) error {
 	if !slices.Equal(dependencyNames(gate["needs"]), expected) || len(expected) == 0 {
 		return fmt.Errorf("every job must influence the complete result")
 	}
-	if gate["if"] != "${{ always() }}" || !preservesFailure(gate["continue-on-error"]) {
-		return fmt.Errorf("result must evaluate failures and cancellations")
+	if !cancelableResultAdmission(gate["if"]) || !preservesFailure(gate["continue-on-error"]) {
+		return fmt.Errorf("result must evaluate failures and stop with workflow cancellation")
 	}
 	steps := workflowSteps(gate)
 	if len(steps) == 0 {
