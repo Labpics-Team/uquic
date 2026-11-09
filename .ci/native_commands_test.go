@@ -67,7 +67,7 @@ func goCommandProblems(args []string, suite string, row map[string]any) error {
 			return err
 		}
 		if !*recursive || !*cover || !*randomize || !*suites || *skip != "integrationtests" || len(operands) != 0 {
-			return fmt.Errorf("Ginkgo must run every non-integration package with coverage and randomized order")
+			return fmt.Errorf("Ginkgo must run every product unit package with coverage and randomized order")
 		}
 		return nil
 	}
@@ -101,7 +101,7 @@ func goCommandProblems(args []string, suite string, row map[string]any) error {
 	if err != nil {
 		return err
 	}
-	packageName := map[string]string{"build": "./...", "contract": "./ci", "chrome": ".", "self": "./integrationtests/self", "tools": "./integrationtests/tools/...", "versionnegotiation": "./integrationtests/versionnegotiation", "benchmarks": "./integrationtests/self"}[suite]
+	packageName := map[string]string{"build": "./...", "contract": "./.ci", "chrome": ".", "self": "./integrationtests/self", "tools": "./integrationtests/tools/...", "versionnegotiation": "./integrationtests/versionnegotiation", "benchmarks": "./integrationtests/self"}[suite]
 	if !slices.Equal(packages, []string{packageName}) || *short || *skip != "" {
 		return fmt.Errorf("%s must execute its complete package scope", suite)
 	}
@@ -237,6 +237,14 @@ func TestNativeMatrixArgumentsAndEnvironment(t *testing.T) {
 }
 
 func TestNativeFlagProperties(t *testing.T) {
+	unit := []string{"run", "github.com/onsi/ginkgo/v2/ginkgo", "-recursive", "-cover", "-randomize-all", "-randomize-suites", "-skip-package=integrationtests"}
+	if err := goCommandProblems(unit, "ginkgo", nil); err != nil {
+		t.Fatal(err)
+	}
+	unit[len(unit)-1] = "-skip-package=integrationtests,cipher"
+	if goCommandProblems(unit, "ginkgo", nil) == nil {
+		t.Fatal("product unit suites may not be skipped")
+	}
 	row := map[string]any{"race": true, "version": 2}
 	for _, args := range [][]string{{"test", "./integrationtests/self", "-race=true", "-count", "1", "-shuffle=on", "-version=2"}, {"test", "-version", "2", "-count=1", "-race", "-shuffle", "on", "./integrationtests/self"}} {
 		if err := goCommandProblems(args, "self", row); err != nil {

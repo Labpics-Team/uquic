@@ -6,7 +6,7 @@
 
 ```sh
 go build ./...
-go test -count=1 ./ci
+go test -count=1 ./.ci
 ```
 
 Затем запустите тесты пакетов:

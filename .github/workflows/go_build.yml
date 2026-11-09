@@ -54,7 +54,8 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version: '1.26.x'
-      - run: go test -count=1 ./ci
+      # CI-only properties have one explicit consumer, outside product discovery.
+      - run: go test -count=1 ./.ci
 
   security:
     runs-on: ubuntu-latest
@@ -68,12 +69,15 @@ jobs:
           set -euo pipefail
           # trivy читает переменные TRIVY_* как флаги: охват проверки задаёт только этот шаг.
           unset "${!TRIVY_@}"
-          version=0.74.0
+          # Trivy 0.74.0 Linux amd64: immutable asset and reviewed bytes.
+          asset=514339431
           sum=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
           dir="$RUNNER_TEMP/trivy"
           mkdir -p "$dir"
-          curl -fsSL --retry 3 --retry-all-errors -o "$dir/trivy.tgz" \
-            "https://github.com/aquasecurity/trivy/releases/download/v$version/trivy_${version}_Linux-64bit.tar.gz"
+          curl -q -fsSL --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 120 --retry 3 --retry-all-errors \
+            -H 'Accept: application/octet-stream' -o "$dir/trivy.tgz" \
+            "https://api.github.com/repos/aquasecurity/trivy/releases/assets/$asset"
           echo "$sum  $dir/trivy.tgz" | sha256sum -c -
           tar -xzf "$dir/trivy.tgz" -C "$dir" trivy
           # Only the exact tracked test key may use the private-key exception.

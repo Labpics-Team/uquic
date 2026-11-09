@@ -146,7 +146,8 @@ func TestSecurityExecutesCompletePolicy(t *testing.T) {
 		lawful = strings.ReplaceAll(lawful, "--severity UNKNOWN,HIGH,CRITICAL", "--severity HIGH --severity UNKNOWN,CRITICAL")
 		lawful = strings.ReplaceAll(lawful, `tar -xzf "$dir/trivy.tgz" -C "$dir" trivy`, `tar --directory="$dir/." --extract --gzip --file="$dir/./trivy.tgz" trivy`)
 		lawful = strings.ReplaceAll(lawful, "sha256sum -c -", "sha256sum --check --strict -")
-		lawful = strings.ReplaceAll(lawful, "version=0.74.0", "version=9.9.9")
+		lawful = strings.ReplaceAll(lawful, "-H 'Accept: application/octet-stream'", "--header='accept:application/octet-stream'")
+		lawful = strings.ReplaceAll(lawful, "asset=514339431", "asset=999999999")
 		lawful = regexp.MustCompile(`sum=[a-f0-9]{64}`).ReplaceAllString(lawful, "sum="+strings.Repeat("a", 64))
 		if err := runSecurityFixture(t, lawful, "healthy"); err != nil {
 			t.Fatal(err)
@@ -164,6 +165,7 @@ func TestSecurityExecutesCompletePolicy(t *testing.T) {
 		"checksum not checked":        strings.Replace(script, "sha256sum -c -", "sha256sum", 1),
 		"different archive checked":   strings.Replace(script, `echo "$sum  $dir/trivy.tgz"`, `echo "$sum  $UQUIC_FIXTURE/archive.tar.gz"`, 1),
 		"download digest trusted":     strings.Replace(script, `echo "$sum  $dir/trivy.tgz"`, `echo "$UQUIC_FIXTURE_DIGEST  $dir/trivy.tgz"`, 1),
+		"API archive media omitted":   strings.Replace(script, "-H 'Accept: application/octet-stream'", "", 1),
 		"different archive extracted": strings.Replace(script, `tar -xzf "$dir/trivy.tgz"`, `tar -xzf "$UQUIC_FIXTURE/archive.tar.gz"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -300,9 +302,17 @@ case "$UQUIC_MODE:$scanners" in dependency-finding:vuln,misconfig|fixed-finding:
 		return fmt.Errorf("scanner download did not execute")
 	}
 	url := curl[len(curl)-1]
-	version := regexp.MustCompile(`/download/v([0-9]+\.[0-9]+\.[0-9]+)/trivy_([0-9]+\.[0-9]+\.[0-9]+)_Linux-64bit.tar.gz$`).FindStringSubmatch(url)
-	if version == nil || version[1] != version[2] {
-		return fmt.Errorf("scanner archive must use one immutable release")
+	if !regexp.MustCompile(`^https://api\.github\.com/repos/aquasecurity/trivy/releases/assets/[0-9]+$`).MatchString(url) {
+		return fmt.Errorf("scanner archive must use an immutable release asset")
+	}
+	headers := append(optionValues(curl, "-H"), optionValues(curl, "--header")...)
+	binaryMedia := false
+	for _, header := range headers {
+		name, value, found := strings.Cut(header, ":")
+		binaryMedia = binaryMedia || found && strings.EqualFold(strings.TrimSpace(name), "accept") && strings.TrimSpace(value) == "application/octet-stream"
+	}
+	if !binaryMedia {
+		return fmt.Errorf("asset API must download binary bytes")
 	}
 	checksum, err := os.ReadFile(filepath.Join(dir, "calls/checksum"))
 	if err != nil {
