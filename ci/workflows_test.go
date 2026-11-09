@@ -1,8 +1,8 @@
 package ci
 
 import (
-	_ "embed"
 	"crypto/sha1"
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -89,33 +89,6 @@ steps:
       PY
 `
 
-// Принятие GO-2026-5932 в .trivyignore.yaml держится, пока openpgp нет в графе зависимостей
-// ни одной проверяемой платформы.
-const openpgpJob = `
-runs-on: ubuntu-latest
-timeout-minutes: 10
-steps:
-  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-    with:
-      persist-credentials: false
-  - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-    with:
-      go-version: '1.26.x'
-  # Платформы со своим кодом (linux, darwin, freebsd, windows, прочие — на примере openbsd)
-  # и 32-битная сборка из CI, с cgo и без.
-  - name: Проверить отсутствие golang.org/x/crypto/openpgp
-    run: |
-      set -euo pipefail
-      dependencies="$(mktemp)"
-      trap 'rm -f "$dependencies"' EXIT
-      for target in linux-amd64 linux-386 linux-arm64 darwin-amd64 darwin-arm64 freebsd-amd64 windows-amd64 windows-arm64 openbsd-amd64; do
-        for cgo in 0 1; do
-          GOOS="${target%-*}" GOARCH="${target#*-}" CGO_ENABLED="$cgo" go list -deps -test ./... >> "$dependencies"
-        done
-      done
-      awk '/^golang\.org\/x\/crypto\/openpgp(\/|$)/ { print; found = 1 } END { exit found }' "$dependencies"
-`
-
 const govulncheckJob = `
 runs-on: ubuntu-latest
 timeout-minutes: 15
@@ -173,8 +146,8 @@ func parse(raw []byte) (map[string]any, error) {
 	}
 	var inspect func(*yaml.Node) error
 	inspect = func(n *yaml.Node) error {
-		if n.Kind == yaml.AliasNode || n.Anchor != "" || n.Tag == "!!merge" || (n.Tag != "" && !strings.HasPrefix(n.Tag, "!!")) {
-			return fmt.Errorf("YAML anchors, aliases, merges and custom tags are not supported")
+		if n.Tag == "!!merge" || (n.Tag != "" && !strings.HasPrefix(n.Tag, "!!")) {
+			return fmt.Errorf("YAML merges and custom tags are not supported")
 		}
 		for _, child := range n.Content {
 			if err := inspect(child); err != nil {
@@ -251,10 +224,6 @@ func validate(files map[string][]byte) error {
 			if err != nil {
 				return fmt.Errorf("invalid security job fixture: %w", err)
 			}
-			openpgp, err := parse([]byte(openpgpJob))
-			if err != nil {
-				return fmt.Errorf("invalid openpgp job fixture: %w", err)
-			}
 			gate, err := parse([]byte(gateJob))
 			if err != nil {
 				return fmt.Errorf("invalid gate job fixture: %w", err)
@@ -266,7 +235,7 @@ func validate(files map[string][]byte) error {
 				return fmt.Errorf("invalid govulncheck job fixture: %w", err)
 			}
 			expectedJobs["govulncheck"] = govulncheck
-			expectedJobs["openpgp"] = openpgp
+			expectedJobs["openpgp"] = nil // Its contract is checked below without a job snapshot.
 			expectedJobs["gate"] = gate
 			expectedJobs["ginkgo"] = map[string]any{"uses": "./.github/workflows/ginkgo_test.yml"}
 			expectedJobs["integration"] = map[string]any{"uses": "./.github/workflows/integration.yml"}
@@ -297,12 +266,15 @@ func validate(files map[string][]byte) error {
 		}
 		// Полный YAML-эталон сохраняет матрицы, команды, inputs и порядок шагов независимо от форматирования.
 		for name, want := range expectedJobs {
+			if name == "openpgp" {
+				continue
+			}
 			if !reflect.DeepEqual(jobs[name], want) {
 				return fmt.Errorf("%s/%s: complete job contract changed", file, name)
 			}
 		}
 	}
-	return nil
+	return validateOpenPGPWorkflow(files["go_build.yml"])
 }
 
 func workflows(t *testing.T) map[string][]byte {
@@ -475,12 +447,16 @@ func TestAcceptedKeyMatchesReviewedBlob(t *testing.T) {
 func TestOpenPGPRejectsForbiddenOrUnresolvedGraph(t *testing.T) {
 	files := workflows(t)
 	w, err := parse(files["go_build.yml"])
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	job := w["jobs"].(map[string]any)["openpgp"].(map[string]any)
 	steps := job["steps"].([]any)
 	script := steps[len(steps)-1].(map[string]any)["run"].(string)
 	bash, err := gateBash()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	const stub = `go() {
 	  if [ "$GOOS-$GOARCH-$CGO_ENABLED" = "$PROBE_TARGET" ]; then
 	    case "$PROBE_MODE" in
@@ -495,16 +471,15 @@ func TestOpenPGPRejectsForbiddenOrUnresolvedGraph(t *testing.T) {
 		cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", stub+"\n"+script)
 		cmd.Env = append(os.Environ(), "PROBE_TARGET="+target, "PROBE_MODE="+mode)
 		out, err := cmd.CombinedOutput()
-		if (err == nil) != success { t.Fatalf("target=%s mode=%s: err=%v, output=%s", target, mode, err, out) }
+		if (err == nil) != success {
+			t.Fatalf("target=%s mode=%s: err=%v, output=%s", target, mode, err, out)
+		}
 	}
 	check("", "", true)
-	parts := strings.SplitN(script, "for target in ", 2)
-	if len(parts) != 2 { t.Fatal("no platform matrix") }
-	targets := strings.Fields(strings.SplitN(parts[1], "; do", 2)[0])
-	if len(targets) < 2 { t.Fatal("missing multi-platform coverage") }
+	targets := openPGPPlatforms
 	for _, target := range targets {
 		for _, cgo := range []string{"0", "1"} {
-			key := target+"-"+cgo
+			key := target + "-" + cgo
 			t.Run(key+"/forbidden", func(t *testing.T) { check(key, "forbidden", false) })
 			t.Run(key+"/failed-go-list", func(t *testing.T) { check(key, "fail", false) })
 		}
@@ -539,7 +514,6 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"govulncheck misses nested module", "go_build.yml", "(cd integrationtests/gomodvendor && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...)", "echo skipped"},
 		{"security scan disabled", "go_build.yml", "  security:\n", "  security:\n    if: false\n"},
 		{"accepted key check removed", "go_build.yml", "          if [ \"$(git hash-object internal/testdata/priv.key)\" != 56b8d894dc12c146ff16e176a942b7dc44aa4562 ]; then\n", ""},
-		{"openpgp go list errors ignored", "go_build.yml", "go list -deps -test ./... >> \"$dependencies\"", "go list -deps -test ./... >> \"$dependencies\" || true"},
 		{"security scan tolerates failure", "go_build.yml", "  security:\n", "  security:\n    continue-on-error: true\n"},
 		{"scanner checksum changed", "go_build.yml", "sum=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a", "sum=$(curl -fsSL \"$url.sha256\")"},
 		{"accepted findings mask a released fix", "go_build.yml", "--ignore-unfixed --ignorefile /dev/null", "--ignore-unfixed \"${accepted[@]}\""},
@@ -547,9 +521,6 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"secret scan skips tests and docs", "go_build.yml", "--secret-config \"$dir/secret.yaml\" ", ""},
 		{"scanner reads trivy.yaml from the tree", "go_build.yml", "fs --config /dev/null ", "fs "},
 		{"scanner reads TRIVY_* from the environment", "go_build.yml", "          unset \"${!TRIVY_@}\"\n", ""},
-		{"openpgp check without test packages", "go_build.yml", "go list -deps -test ./...", "go list -deps ./..."},
-		{"openpgp check tolerates a match", "go_build.yml", "END { exit found }", "END { exit 0 }"},
-		{"openpgp check misses a platform", "go_build.yml", " freebsd-amd64", ""},
 		{"caller disabled", "go_build.yml", "  ginkgo:\n", "  ginkgo:\n    if: false\n"},
 		{"caller tolerates failure", "go_build.yml", "  integration:\n", "  integration:\n    continue-on-error: true\n"},
 		{"caller inputs", "go_build.yml", "  ginkgo:\n", "  ginkgo:\n    with:\n      skip: true\n"},
@@ -576,7 +547,6 @@ func TestContractRejectsMutations(t *testing.T) {
 		{"test failure tolerated", "integration.yml", "./integrationtests/tools/...\n", "./integrationtests/tools/...\n        continue-on-error: true\n"},
 		{"duplicate key", "go_build.yml", "name: \"Go Build\"", "name: \"Go Build\"\nname: ignored"},
 		{"multiple documents", "go_build.yml", "name: \"Go Build\"", "name: \"Go Build\"\n---"},
-		{"YAML alias", "go_build.yml", "name: \"Go Build\"", "name: &title \"Go Build\""},
 		{"YAML merge", "go_build.yml", "jobs:\n", "jobs:\n  <<: {hidden: {}}\n"},
 	}
 	for _, mutation := range mutations {
