@@ -18,6 +18,7 @@
 ## Справка
 
 - [Контракт выбора браузерного профиля](reference/browser-profile.md).
+- [Проверки CI и условия успеха](reference/ci-checks.md).
 - [HTTP/3 transport](../http3/README.md).
 - [Внутренний двусвязный список](../internal/utils/linkedlist/README.md).
 - [Происхождение upstream-версии](../Changelog.md).
