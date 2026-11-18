@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 func TestNATRebinding(t *testing.T) {
 	tr, tracer := newPacketTracer()
 	tlsConf := getTLSConfig()
-	f, err := os.Create("keylog.txt")
+	f, err := os.Create(filepath.Join(t.TempDir(), "keylog.txt"))
 	require.NoError(t, err)
 	defer f.Close()
 	tlsConf.KeyLogWriter = f
