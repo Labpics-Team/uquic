@@ -187,7 +187,7 @@ func integrationMatrixSet(jobs map[string]any, name string, fields []string) (ma
 		tuple := make([]string, 0, len(fields))
 		for _, field := range fields {
 			switch field {
-			case "race", "use32bit":
+			case "race", "use32bit", "integration":
 				value, ok := row[field].(bool)
 				if !ok {
 					return nil, fmt.Errorf("%s: %s must be boolean", name, field)
@@ -232,6 +232,10 @@ func integrationCaseSet(keys ...string) map[string]bool {
 }
 
 func validateIntegrationUnion(jobs map[string]any) error {
+	macOSCases, err := macOSIntegrationCases(jobs)
+	if err != nil {
+		return err
+	}
 	policies := []struct {
 		name   string
 		fields []string
@@ -289,6 +293,12 @@ func validateIntegrationUnion(jobs map[string]any) error {
 		got, err := integrationMatrixSet(jobs, policy.name, policy.fields)
 		if err != nil {
 			return err
+		}
+		for key := range macOSCases[policy.name] {
+			if got[key] {
+				return fmt.Errorf("%s: duplicate case %s", policy.name, key)
+			}
+			got[key] = true
 		}
 		if !reflect.DeepEqual(got, policy.cases) {
 			return fmt.Errorf("%s: complete invocation union changed", policy.name)

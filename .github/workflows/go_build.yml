@@ -30,7 +30,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
+        # The integration workflow owns both macOS compiler lanes.
+        os: [ "ubuntu-latest", "windows-latest" ]
         go: [ "1.26.0", "1.26.x" ]
     runs-on: ${{ matrix.os }}
     steps:

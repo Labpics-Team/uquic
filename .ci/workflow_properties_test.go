@@ -97,7 +97,15 @@ func requiredConsumer(script string) bool {
 		strings.Contains(script, "scan --scanners")
 }
 
-func sourcePreparation(job map[string]any) error {
+func sourcePreparation(job map[string]any, independentScenarios bool) error {
+	compilerID := ""
+	if independentScenarios {
+		var err error
+		compilerID, err = macOSCompilerID(job)
+		if err != nil {
+			return err
+		}
+	}
 	if !preservesFailure(job["continue-on-error"]) || !requiredStepAdmission(job["if"]) {
 		return fmt.Errorf("required job may not be disabled or ignored")
 	}
@@ -121,7 +129,11 @@ func sourcePreparation(job map[string]any) error {
 		uses, _ := step["uses"].(string)
 		script, _ := step["run"].(string)
 		if strings.HasPrefix(uses, "actions/checkout@") || strings.HasPrefix(uses, "actions/setup-go@") || requiredConsumer(script) {
-			if !requiredStepAdmission(step["if"]) || !preservesFailure(step["continue-on-error"]) {
+			admitted := requiredStepAdmission(step["if"])
+			if independentScenarios && requiredConsumer(script) {
+				admitted = preparedScenarioAdmission(step["if"], compilerID, strings.Contains(script, "ci/run-native-tests.sh"))
+			}
+			if !admitted || !preservesFailure(step["continue-on-error"]) {
 				return fmt.Errorf("required preparation and commands must execute and preserve failures")
 			}
 		}
@@ -308,7 +320,7 @@ func validateWorkflowProperties(files map[string][]byte) error {
 			if job["uses"] != nil {
 				continue
 			}
-			if name != "build" && name != "contract" && name != "security" && name != "govulncheck" && name != "integration" && name != "ancillary" && name != "benchmarks" {
+			if name != "build" && name != "contract" && name != "security" && name != "govulncheck" && name != "integration" && name != "ancillary" && name != "benchmarks" && name != "macos" {
 				for _, raw := range workflowSteps(job) {
 					step := raw.(map[string]any)
 					uses, _ := step["uses"].(string)
@@ -318,7 +330,7 @@ func validateWorkflowProperties(files map[string][]byte) error {
 				}
 				continue
 			}
-			if err := sourcePreparation(job); err != nil {
+			if err := sourcePreparation(job, file == "integration.yml" && name == "macos"); err != nil {
 				return fmt.Errorf("%s/%s: %w", file, name, err)
 			}
 			for _, raw := range workflowSteps(job) {
@@ -343,7 +355,8 @@ func validateWorkflowProperties(files map[string][]byte) error {
 			}
 		}
 	}
-	for file, osValues := range map[string][]string{"go_build.yml": {"ubuntu-latest", "windows-latest", "macos-latest"}, "ginkgo_test.yml": nil} {
+	// macOS builds are checked together with their compiler lanes below.
+	for file, osValues := range map[string][]string{"go_build.yml": {"ubuntu-latest", "windows-latest"}, "ginkgo_test.yml": nil} {
 		workflow, _ := parse(files[file])
 		job, _ := workflowJobs(workflow)["build"].(map[string]any)
 		strategy, _ := job["strategy"].(map[string]any)

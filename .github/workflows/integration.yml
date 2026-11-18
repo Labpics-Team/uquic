@@ -6,7 +6,8 @@ on:
 permissions:
   contents: read
 
-# Независимые группы выполняются в отдельных hosted-средах.
+# Linux/Windows cases use separate hosted jobs. macOS reuses a VM per compiler;
+# each scenario still has its own Bash/Go process and preserves its failure.
 # Таймеры, тела тестов и параметры нагрузки остаются прежними.
 # Compiler flags and user Go configuration cannot alter the native case.
 env:
@@ -122,18 +123,6 @@ jobs:
             use32bit: false
             mode: "v2"
             version: 2
-          - os: "macos"
-            go: "1.26.x"
-            race: false
-            use32bit: false
-            mode: "v1"
-            version: 1
-          - os: "macos"
-            go: "1.26.x"
-            race: false
-            use32bit: false
-            mode: "v2"
-            version: 2
     runs-on: ${{ format('{0}-latest', matrix.os) }}
     timeout-minutes: 30
     env:
@@ -179,10 +168,6 @@ jobs:
             go: "1.26.x"
             race: false
             use32bit: false
-          - os: "macos"
-            go: "1.26.x"
-            race: false
-            use32bit: false
     runs-on: ${{ format('{0}-latest', matrix.os) }}
     timeout-minutes: 30
     env:
@@ -224,10 +209,6 @@ jobs:
             go: "1.26.x"
             race: false
             use32bit: false
-          - os: "macos"
-            go: "1.26.x"
-            race: false
-            use32bit: false
     runs-on: ${{ format('{0}-latest', matrix.os) }}
     timeout-minutes: 30
     env:
@@ -246,9 +227,64 @@ jobs:
       - run: go version
       - name: Измерить производительность
         run: bash ci/run-native-tests.sh benchmarks
+  # Six short macOS jobs required six scarce arm64 runner allocations. Keep the
+  # same build/test cases in two compiler lanes, acquiring at most one VM at once.
+  macos:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - go: "1.26.0"
+            integration: false
+          - go: "1.26.x"
+            integration: true
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      DEBUG: false
+      TIMESCALE_FACTOR: 3
+      QUIC_CI_RACE: false
+      QUIC_CI_32BIT: false
+    name: "macOS (Go ${{ matrix.go }})"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        id: compiler
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go version
+      - name: Build
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        run: go build -v ./...
+      # A failed sibling must not skip the other independent cases. Preparation
+      # failure and workflow cancellation still stop every dependent command.
+      - name: Проверить протокол v1
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && matrix.integration }}
+        env:
+          QUIC_CI_MODE: v1
+          QUIC_CI_VERSION: 1
+        run: bash ci/run-native-tests.sh self
+      - name: Проверить протокол v2
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && matrix.integration }}
+        env:
+          QUIC_CI_MODE: v2
+          QUIC_CI_VERSION: 2
+        run: bash ci/run-native-tests.sh self
+      - name: Проверить инструменты
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && matrix.integration }}
+        run: bash ci/run-native-tests.sh tools
+      - name: Проверить согласование версии
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && matrix.integration }}
+        run: bash ci/run-native-tests.sh versionnegotiation
+      - name: Измерить производительность
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' && matrix.integration }}
+        run: bash ci/run-native-tests.sh benchmarks
   gate:
     name: Интеграционные проверки
-    needs: [integration, ancillary, benchmarks]
+    needs: [integration, ancillary, benchmarks, macos]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

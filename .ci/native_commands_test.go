@@ -156,6 +156,62 @@ func nativeCallStep(job map[string]any, suite string) (map[string]any, error) {
 	return nil, fmt.Errorf("native %s invocation missing", suite)
 }
 
+func probeNativeScenario(t *testing.T, bash, repository string, scenario nativeScenario, fail bool) error {
+	t.Helper()
+	dir := t.TempDir()
+	log := bashPath(filepath.Join(dir, "argv"))
+	state := bashPath(filepath.Join(dir, "environment"))
+	stub := `go() { printf x >> "$UQUIC_CALLS"; printf '%s\0' "$@" > "$UQUIC_ARGUMENTS"; printf '%s|%s|%s|%s|%s|%s' "${GOOS:-}" "${GOARCH:-}" "${QUIC_GO_DISABLE_GSO:-}" "${QUIC_GO_DISABLE_ECN:-}" "$GOFLAGS" "$GOENV" > "$UQUIC_ENVIRONMENT"; if [ "$UQUIC_FAIL" = true ];then return 23;fi; }; export -f go
+`
+	row, suite, step := scenario.row, scenario.suite, scenario.step
+	values := map[string]string{
+		"UQUIC_ARGUMENTS": log, "UQUIC_ENVIRONMENT": state,
+		"UQUIC_CALLS": bashPath(filepath.Join(dir, "calls")), "UQUIC_FAIL": fmt.Sprint(fail),
+		"QUIC_CI_RACE": fmt.Sprint(row["race"]), "QUIC_CI_32BIT": fmt.Sprint(row["use32bit"]),
+		"QUIC_CI_MODE": "", "QUIC_CI_VERSION": "", "DEBUG": "false", "TIMESCALE_FACTOR": "3",
+		"GOOS": "plan9", "GOARCH": "arm", "GOFLAGS": "-run=Nothing", "GOENV": "poison",
+		"QUIC_GO_DISABLE_GSO": "true", "QUIC_GO_DISABLE_ECN": "true",
+	}
+	if suite == "self" {
+		values["QUIC_CI_MODE"] = fmt.Sprint(row["mode"])
+		values["QUIC_CI_VERSION"] = fmt.Sprint(row["version"])
+	}
+	output, runErr := runContractBash(bash, "cd '"+bashPath(repository)+"'\n"+stub+step["run"].(string), values)
+	if (runErr != nil) != fail {
+		return fmt.Errorf("Go failure=%t: %v %s", fail, runErr, output)
+	}
+	calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+	if err != nil || string(calls) != "x" {
+		return fmt.Errorf("expected one complete Go invocation, got %q: %v", calls, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "argv"))
+	if err != nil {
+		return err
+	}
+	args := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+	if err := goCommandProblems(args, suite, row); err != nil {
+		return err
+	}
+	actual, err := os.ReadFile(filepath.Join(dir, "environment"))
+	if err != nil {
+		return err
+	}
+	arch, gso, ecn := "", "", ""
+	if row["use32bit"] == true {
+		arch = "386"
+	}
+	if row["mode"] == "gso" {
+		gso = "true"
+	}
+	if row["mode"] == "ecn" {
+		ecn = "true"
+	}
+	if string(actual) != strings.Join([]string{"", arch, gso, ecn, "", "off"}, "|") {
+		return fmt.Errorf("wrong native environment: %s", actual)
+	}
+	return nil
+}
+
 func TestNativeMatrixArgumentsAndEnvironment(t *testing.T) {
 	workflow, err := parse(workflows(t)["integration.yml"])
 	if err != nil {
@@ -190,48 +246,65 @@ func TestNativeMatrixArgumentsAndEnvironment(t *testing.T) {
 						t.Fatal(err)
 					}
 					for _, fail := range []bool{false, true} {
-						dir := t.TempDir()
-						log := bashPath(filepath.Join(dir, "argv"))
-						state := bashPath(filepath.Join(dir, "environment"))
-						stub := `go() { printf '%s\0' "$@" > "$UQUIC_ARGUMENTS"; printf '%s|%s|%s|%s|%s|%s' "${GOOS:-}" "${GOARCH:-}" "${QUIC_GO_DISABLE_GSO:-}" "${QUIC_GO_DISABLE_ECN:-}" "$GOFLAGS" "$GOENV" > "$UQUIC_ENVIRONMENT"; if [ "$UQUIC_FAIL" = true ];then return 23;fi; }; export -f go
-`
-						values := map[string]string{"UQUIC_ARGUMENTS": log, "UQUIC_ENVIRONMENT": state, "UQUIC_FAIL": fmt.Sprint(fail), "QUIC_CI_RACE": fmt.Sprint(row["race"]), "QUIC_CI_32BIT": fmt.Sprint(row["use32bit"]), "QUIC_CI_MODE": "", "QUIC_CI_VERSION": "", "DEBUG": "false", "TIMESCALE_FACTOR": "3", "GOOS": "plan9", "GOARCH": "arm", "GOFLAGS": "-run=Nothing", "GOENV": "poison", "QUIC_GO_DISABLE_GSO": "true", "QUIC_GO_DISABLE_ECN": "true"}
-						if jobName == "integration" {
-							values["QUIC_CI_MODE"] = fmt.Sprint(row["mode"])
-							values["QUIC_CI_VERSION"] = fmt.Sprint(row["version"])
-						}
-						output, runErr := runContractBash(bash, "cd '"+bashPath(repository)+"'\n"+stub+step["run"].(string), values)
-						if (runErr != nil) != fail {
-							t.Fatalf("Go failure=%t: %v %s", fail, runErr, output)
-						}
-						data, err := os.ReadFile(filepath.Join(dir, "argv"))
-						if err != nil {
+						if err := probeNativeScenario(t, bash, repository, nativeScenario{suite, step, row}, fail); err != nil {
 							t.Fatal(err)
-						}
-						args := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
-						if err := goCommandProblems(args, suite, row); err != nil {
-							t.Fatal(err)
-						}
-						actual, err := os.ReadFile(filepath.Join(dir, "environment"))
-						if err != nil {
-							t.Fatal(err)
-						}
-						arch, gso, ecn := "", "", ""
-						if row["use32bit"] == true {
-							arch = "386"
-						}
-						if row["mode"] == "gso" {
-							gso = "true"
-						}
-						if row["mode"] == "ecn" {
-							ecn = "true"
-						}
-						if string(actual) != strings.Join([]string{"", arch, gso, ecn, "", "off"}, "|") {
-							t.Fatalf("wrong native environment: %s", actual)
 						}
 					}
 				})
 			}
+		}
+	}
+	scenarios, err := macOSScenarios(workflowJobs(workflow)["macos"].(map[string]any))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, scenario := range scenarios {
+		if scenario.suite == "build" {
+			continue // The native build probe below also covers this compiler lane.
+		}
+		t.Run(fmt.Sprintf("macos/%d/%s", index, scenario.suite), func(t *testing.T) {
+			for _, fail := range []bool{false, true} {
+				if err := probeNativeScenario(t, bash, repository, scenario, fail); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestMacOSInvocationProbeRejectsHiddenFailureAndRepeatedWork(t *testing.T) {
+	workflow, err := parse(workflows(t)["integration.yml"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, err := macOSScenarios(workflowJobs(workflow)["macos"].(map[string]any))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash, err := gateBash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range scenarios {
+		if scenario.suite == "build" {
+			continue
+		}
+		original := scenario.step["run"].(string)
+		for _, mutation := range []string{"hidden failure", "repeated invocation"} {
+			t.Run(scenario.suite+"/"+mutation, func(t *testing.T) {
+				step := map[string]any{"run": original + " || true"}
+				fail := true
+				if mutation == "repeated invocation" {
+					step["run"], fail = original+"\n"+original, false
+				}
+				if probeNativeScenario(t, bash, repository, nativeScenario{scenario.suite, step, scenario.row}, fail) == nil {
+					t.Fatal("native invocation probe accepted lost execution semantics")
+				}
+			})
 		}
 	}
 }
@@ -269,6 +342,7 @@ func TestBuildUnitAndVulnerabilityCommands(t *testing.T) {
 	}
 	for _, tc := range []struct{ file, job, prefix, suite string }{
 		{"go_build.yml", "build", "go build ", "build"},
+		{"integration.yml", "macos", "go build ", "build"},
 		{"go_build.yml", "contract", "go test ", "contract"},
 		{"ginkgo_test.yml", "build", "go test ", "chrome"},
 		{"ginkgo_test.yml", "build", "go run ", "ginkgo"},
@@ -291,7 +365,15 @@ func TestBuildUnitAndVulnerabilityCommands(t *testing.T) {
 					}
 				}
 			}
-			if selected == nil || !requiredStepAdmission(selected["if"]) || !preservesFailure(selected["continue-on-error"]) {
+			admitted := selected != nil && requiredStepAdmission(selected["if"])
+			if tc.job == "macos" && selected != nil {
+				compilerID, err := macOSCompilerID(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				admitted = preparedScenarioAdmission(selected["if"], compilerID, false)
+			}
+			if !admitted || !preservesFailure(selected["continue-on-error"]) {
 				t.Fatal("required native command must execute")
 			}
 			for _, mode := range []string{"healthy", "fail-root", "fail-nested"} {
