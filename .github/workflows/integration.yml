@@ -134,10 +134,10 @@ jobs:
       QUIC_CI_VERSION: ${{ matrix.version }}
     name: "Протокольные сценарии (${{ matrix.os }}, Go ${{ matrix.go }}, ${{ matrix.mode }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: ${{ matrix.go }}
       - run: go version
@@ -177,10 +177,10 @@ jobs:
       QUIC_CI_32BIT: ${{ matrix.use32bit }}
     name: "Вспомогательные сценарии (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.race && ', race' || '' }}${{ matrix.use32bit && ', 32-bit' || '' }})"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: ${{ matrix.go }}
       - run: go version
@@ -218,10 +218,10 @@ jobs:
       QUIC_CI_32BIT: ${{ matrix.use32bit }}
     name: "Производительность (${{ matrix.os }}, Go ${{ matrix.go }}${{ matrix.use32bit && ', 32-bit' || '' }})"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: ${{ matrix.go }}
       - run: go version
@@ -248,10 +248,10 @@ jobs:
       QUIC_CI_32BIT: false
     name: "macOS (Go ${{ matrix.go }})"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         id: compiler
         with:
           go-version: ${{ matrix.go }}
