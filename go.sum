@@ -106,8 +106,8 @@ github.com/prometheus/procfs v0.16.1 h1:hZ15bTNuirocR6u0JZ6BAHHmwS1p8B4P6MRqxtzM
 github.com/prometheus/procfs v0.16.1/go.mod h1:teAbpZRB1iIAJYREa1LsoWUXykVXA1KlTmWl8x/U+Is=
 github.com/quic-go/qpack v0.5.1 h1:giqksBPnT/HDtZ6VhtFKgoLOWmlyo9Ei6u9PqzIMbhI=
 github.com/quic-go/qpack v0.5.1/go.mod h1:+PC4XFrEskIVkcLzpEkbLqq1uCoxPhQuvK5rH1ZgaEg=
-github.com/refraction-networking/clienthellod v0.5.0-alpha2 h1:h4y/a97p9EsxAdhXYCBcf8kGfroJ6sjTQ4F/yJyna4A=
-github.com/refraction-networking/clienthellod v0.5.0-alpha2/go.mod h1:4vN+Qh4x2TznUMsfw6N3ohGjwvfs6lnwwNPUn7zI9bQ=
+github.com/refraction-networking/clienthellod v0.5.0-alpha3 h1:zu83Zm/XuCGeHz+I6AFaa1VLu9ykNCxn+Jl2D6LfSws=
+github.com/refraction-networking/clienthellod v0.5.0-alpha3/go.mod h1:4vN+Qh4x2TznUMsfw6N3ohGjwvfs6lnwwNPUn7zI9bQ=
 github.com/refraction-networking/utls v1.8.3-0.20260924070827-6af385813fd8 h1:HSCsyeQ4AKKlMhhcHgKAn9vUK/J5zCbYOeb2VyKpSfo=
 github.com/refraction-networking/utls v1.8.3-0.20260924070827-6af385813fd8/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
 github.com/rogpeppe/go-internal v1.10.0 h1:TMyTOH3F/DB16zRVcYyreMH6GnZZrwQVAoYjRBZyWFQ=

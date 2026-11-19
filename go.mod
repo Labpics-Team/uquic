@@ -8,7 +8,7 @@ require (
 	github.com/onsi/gomega v1.37.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/quic-go/qpack v0.5.1
-	github.com/refraction-networking/clienthellod v0.5.0-alpha2
+	github.com/refraction-networking/clienthellod v0.5.0-alpha3
 	github.com/refraction-networking/utls v1.8.3-0.20260924070827-6af385813fd8
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/mock v0.5.2
@@ -19,7 +19,6 @@ require (
 	golang.org/x/sys v0.49.0
 	golang.org/x/time v0.11.0
 	golang.org/x/tools v0.51.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -42,4 +41,5 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
